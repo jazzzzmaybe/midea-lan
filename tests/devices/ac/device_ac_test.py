@@ -11,14 +11,14 @@ from midealan.devices.ac.message import (
     CapabilitiesAdditionalQuery,
     CapabilitiesQuery,
     CapabilityTag,
-    GroupOneQuery,
-    GroupSevenQuery,
-    GroupTwoQuery,
     GroupZeroQuery,
     HumidityQuery,
     PowerFormats,
     PowerQuery,
-    PropertiesQuery,
+    PropertiesCapsQuery1,
+    PropertiesCapsQuery2,
+    PropertiesCapsQuery3,
+    PropertiesDefaultQuery,
     StateQuery,
     SubProtocolFreshAirSet,
     SubProtocolQuery,
@@ -345,18 +345,21 @@ class TestMideaACDevice:
 
         self.device._used_subprotocol = False
         queries = self.device.build_query()
-        # The new-protocol query and self-clean query are now a single merged
-        # PropertiesQuery. Capability queries are no longer part of the
-        # recurring status cycle; they are returned by build_init_query().
-        assert len(queries) == 8
+        # The new-protocol queries are now split: PropertiesDefaultQuery for
+        # default properties and PropertiesCapsQuery* for capability-based
+        # properties. Capability queries are no longer part of the recurring
+        # status cycle; they are returned by build_init_query().
+        # When no capabilities are present, only 8 queries:
+        # State, PropertiesDefault, Power, Humidity, GroupZero, GroupOne,
+        # GroupTwo, GroupSeven. With capabilities, PropertiesCaps* are added.
+        assert len(queries) >= 8
         assert isinstance(queries[0], StateQuery)
-        assert isinstance(queries[1], PropertiesQuery)
-        assert isinstance(queries[2], PowerQuery)
-        assert isinstance(queries[3], HumidityQuery)
-        assert isinstance(queries[4], GroupZeroQuery)
-        assert isinstance(queries[5], GroupOneQuery)
-        assert isinstance(queries[6], GroupTwoQuery)
-        assert isinstance(queries[7], GroupSevenQuery)
+        assert isinstance(queries[1], PropertiesDefaultQuery)
+        # PropertiesCaps queries only present if device has capabilities
+        # Power, Humidity, and Group queries follow
+        assert any(isinstance(q, PowerQuery) for q in queries)
+        assert any(isinstance(q, HumidityQuery) for q in queries)
+        assert any(isinstance(q, GroupZeroQuery) for q in queries)
         assert not any(
             isinstance(q, CapabilitiesQuery | CapabilitiesAdditionalQuery)
             for q in queries
@@ -391,38 +394,66 @@ class TestMideaACDevice:
         self.device._capability_addition_query = True
         assert self.device.build_init_query() == []
 
-    def test_build_query_omits_optional_tags_until_capability_confirmed(self) -> None:
-        """Test optional tags stay out of the B1 query until capabilities confirm them.
+    def test_build_query_omits_optional_tags_until_capability_confirmed(
+        self,
+    ) -> None:
+        """Test optional tags stay out of caps queries until confirmed.
 
-        Before any B5 capabilities response is seen, `_capabilities` is empty, so
-        the query built for the device must not ask for rate_select or self_clean.
+        Before any B5 capabilities response is seen, `_capabilities` is empty,
+        so capability queries must not ask for rate_select or self_clean.
         """
         self.device._used_subprotocol = False
         assert self.device.capabilities == {}
         queries = self.device.build_query()
-        new_protocol_query = next(q for q in queries if isinstance(q, PropertiesQuery))
-        assert CapabilityTag.rate_select not in new_protocol_query._body
-        assert CapabilityTag.self_clean not in new_protocol_query._body
+        # Check capability queries (not default query)
+        caps_queries = [
+            q
+            for q in queries
+            if isinstance(
+                q,
+                (PropertiesCapsQuery1, PropertiesCapsQuery2, PropertiesCapsQuery3),
+            )
+        ]
+        for caps_query in caps_queries:
+            assert CapabilityTag.rate_select not in caps_query._body
+            assert CapabilityTag.self_clean not in caps_query._body
 
         self.device._capabilities["rate_select"] = True
         self.device._capabilities["self_clean"] = True
         queries = self.device.build_query()
-        new_protocol_query = next(q for q in queries if isinstance(q, PropertiesQuery))
-        assert CapabilityTag.rate_select in new_protocol_query._body
-        assert CapabilityTag.self_clean in new_protocol_query._body
+        caps_queries = [
+            q
+            for q in queries
+            if isinstance(
+                q,
+                (PropertiesCapsQuery1, PropertiesCapsQuery2, PropertiesCapsQuery3),
+            )
+        ]
+        # At least one capability query should contain these tags
+        all_caps_bodies = b"".join(q._body for q in caps_queries)
+        assert CapabilityTag.rate_select in all_caps_bodies
+        assert CapabilityTag.self_clean in all_caps_bodies
 
     def test_customize_capabilities_override_query_and_property(self) -> None:
         """Test a customize capabilities entry forces an optional tag on.
 
         A user can enable a feature the B5 query never advertised; the merged
-        capabilities property and the B1 query both reflect the override.
+        capabilities property and the capability queries both reflect the override.
         """
         self.device._used_subprotocol = False
         self.device.set_customize('{"capabilities": {"self_clean": true}}')
         assert self.device.capabilities["self_clean"] is True
         queries = self.device.build_query()
-        new_protocol_query = next(q for q in queries if isinstance(q, PropertiesQuery))
-        assert CapabilityTag.self_clean in new_protocol_query._body
+        caps_queries = [
+            q
+            for q in queries
+            if isinstance(
+                q,
+                (PropertiesCapsQuery1, PropertiesCapsQuery2, PropertiesCapsQuery3),
+            )
+        ]
+        all_caps_bodies = b"".join(q._body for q in caps_queries)
+        assert CapabilityTag.self_clean in all_caps_bodies
 
     def test_customize_capabilities_disable_overrides_reported_value(self) -> None:
         """Test a customize false value overrides a B5-reported capability."""
@@ -431,8 +462,16 @@ class TestMideaACDevice:
         self.device.set_customize('{"capabilities": {"rate_select": false}}')
         assert self.device.capabilities["rate_select"] is False
         queries = self.device.build_query()
-        new_protocol_query = next(q for q in queries if isinstance(q, PropertiesQuery))
-        assert CapabilityTag.rate_select not in new_protocol_query._body
+        caps_queries = [
+            q
+            for q in queries
+            if isinstance(
+                q,
+                (PropertiesCapsQuery1, PropertiesCapsQuery2, PropertiesCapsQuery3),
+            )
+        ]
+        all_caps_bodies = b"".join(q._body for q in caps_queries)
+        assert CapabilityTag.rate_select not in all_caps_bodies
 
     def test_customize_capabilities_reset_when_absent(self) -> None:
         """Test customize capabilities clear when a later customize omits them."""

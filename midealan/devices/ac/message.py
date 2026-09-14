@@ -482,17 +482,63 @@ class ToggleDisplay(MessageACBase):
         )
 
 
-class PropertiesQuery(MessageACBase):
-    """AC message new protocol query.
+class PropertiesDefaultQuery(MessageACBase):
+    """AC message new protocol default properties query.
 
-    A single B1 query carries a list of new-protocol tags. The device answers
-    with an empty parameter list when a request carries a tag it does not
-    support, which suppresses every other tag in the same request. The base
-    list therefore holds only tags every new-protocol device is known to
-    answer, while status feature tags that some devices reject (self_clean,
-    rate_select, ...) are appended automatically from the merged capabilities
-    map (B5 capabilities overlaid with the user's customize overrides): any
-    capability key that names a CapabilityTag member and is truthy is added.
+    Queries the base set of properties that every new-protocol device is
+    expected to support. This query is independent from capability-based
+    properties, so if a device does not support capability queries, the
+    default properties are still retrieved.
+
+    Limited to 8 properties to stay well under the 12-property device limit
+    and avoid issues where some AC models fail when a B1 query contains more
+    than 12 properties. See https://github.com/wuwentao/midea_ac_lan/issues/1031
+    """
+
+    _default_properties: tuple[int, ...] = (
+        CapabilityTag.indirect_wind,
+        CapabilityTag.breezeless,
+        CapabilityTag.indoor_humidity,
+        CapabilityTag.screen_display,
+        CapabilityTag.fresh_air_1,
+        CapabilityTag.fresh_air_2,
+        CapabilityTag.wind_lr_angle,
+        CapabilityTag.wind_ud_angle,
+    )
+
+    def __init__(self, protocol_version: int) -> None:
+        """Initialize AC message new protocol default properties query."""
+        super().__init__(
+            protocol_version=protocol_version,
+            message_type=MessageType.query,
+            body_type=ListTypes.B1,
+        )
+
+    @property
+    def _body(self) -> bytearray:
+        params = list(self._default_properties)
+        _LOGGER.debug(
+            "PropertiesDefaultQuery: querying %d default properties: %s",
+            len(params),
+            [CapabilityTag(tag).name for tag in params],
+        )
+        _body = bytearray([len(params)])
+        for param in params:
+            _body.extend([param & 0xFF, param >> 8])
+        return _body
+
+
+class _PropertiesCapsQueryBase(MessageACBase):
+    """Base class for capability-based properties queries.
+
+    Shared logic for all PropertiesCapsQuery variants. Each variant has a
+    different class name so they can be independently disabled in
+    _unsupported_protocol when a device does not support a particular batch.
+
+    This split avoids the issue where some AC models fail when a B1 query
+    contains more than 12 properties, and ensures that if one batch fails,
+    other batches can still be queried successfully.
+    See https://github.com/wuwentao/midea_ac_lan/issues/1031
     """
 
     # Tags that only ever appear in B5 capability advertisements, never as valid
@@ -518,15 +564,18 @@ class PropertiesQuery(MessageACBase):
         },
     )
 
-    _default_properties: tuple[int, ...] = (
-        CapabilityTag.indirect_wind,
-        CapabilityTag.breezeless,
-        CapabilityTag.indoor_humidity,
-        CapabilityTag.screen_display,
-        CapabilityTag.fresh_air_1,
-        CapabilityTag.fresh_air_2,
-        CapabilityTag.wind_lr_angle,
-        CapabilityTag.wind_ud_angle,
+    # Properties that are part of the default query - excluded from caps query
+    _DEFAULT_PROPERTIES: frozenset[int] = frozenset(
+        {
+            CapabilityTag.indirect_wind,
+            CapabilityTag.breezeless,
+            CapabilityTag.indoor_humidity,
+            CapabilityTag.screen_display,
+            CapabilityTag.fresh_air_1,
+            CapabilityTag.fresh_air_2,
+            CapabilityTag.wind_lr_angle,
+            CapabilityTag.wind_ud_angle,
+        },
     )
 
     _capability_properties: tuple[int, ...] = (
@@ -538,80 +587,114 @@ class PropertiesQuery(MessageACBase):
         CapabilityTag.error_code,
     )
 
+    _MAX_PROPERTIES = 12
+
     def __init__(
         self,
         protocol_version: int,
         *,
-        capabilities: dict[str, CapabilityValue] | None = None,
+        properties_subset: list[int] | None = None,
     ) -> None:
-        """Initialize AC message new protocol query.
+        """Initialize capability-based properties query.
 
-        `capabilities` is the device's merged capability map (B5-parsed values
-        overlaid with the user's customize overrides). Every capability key that
-        names a CapabilityTag member and is truthy is appended to the query,
-        so a device that never advertised a feature (or that a user disabled via
-        customize) is not asked for it.
+        Args:
+            protocol_version: Protocol version
+            properties_subset: Specific list of property tags to query.
+                If None or empty, query will return an empty body.
+
         """
         super().__init__(
             protocol_version=protocol_version,
             message_type=MessageType.query,
             body_type=ListTypes.B1,
         )
-        self._capabilities = capabilities or {}
-        # `_body` is read several times per send (encode -> frame -> CRC), so
-        # the build log is emitted only on the first read to avoid duplicates.
-        self._build_logged = False
+        self._properties_subset = properties_subset or []
 
     @property
     def _body(self) -> bytearray:
-        params = list(self._default_properties)
-        default_tags = frozenset(self._default_properties)
-        properties_tags = frozenset(self._capability_properties)
+        params = self._properties_subset
+        if params:
+            _LOGGER.debug(
+                "%s: querying %d properties: %s",
+                self.__class__.__name__,
+                len(params),
+                [CapabilityTag(tag).name for tag in params],
+            )
+        else:
+            _LOGGER.debug(
+                "%s: no properties to query (empty batch)",
+                self.__class__.__name__,
+            )
+        _body = bytearray([len(params)])
+        for param in params:
+            _body.extend([param & 0xFF, param >> 8])
+        return _body
 
-        # Auto-append tags from the merged capabilities map. A capability key is
-        # queried only when it names a CapabilityTag member and its value is
-        # truthy, so a device that never advertised a feature (or that a user
-        # disabled via customize) is not asked for it. Tags are sorted by value
-        # so the produced body is deterministic.
+    @staticmethod
+    def collect_capability_properties(
+        capabilities: dict[str, CapabilityValue],
+    ) -> list[int]:
+        """Collect all capability-based property tags from capabilities dict.
+
+        Returns a sorted list of tags that should be queried based on the
+        device's capabilities, excluding default properties and capability-only tags.
+
+        Args:
+            capabilities: Device's merged capability map (B5-parsed values
+                overlaid with the user's customize overrides)
+
+        Returns:
+            Sorted list of property tag values to query
+
+        """
+        properties_tags = frozenset(_PropertiesCapsQueryBase._capability_properties)
         properties_query: list[CapabilityTag] = []
         additional_tags: list[CapabilityTag] = []
-        for key, value in self._capabilities.items():
+
+        for key, value in capabilities.items():
             if not value:
                 continue  # Skip falsy values (0, False, None).
             try:
                 tag = CapabilityTag[key]
             except KeyError:
                 continue  # Key does not name a CapabilityTag member.
-            if tag in default_tags:
-                continue
-            if tag in self._CAPABILITY_ONLY_TAGS:
+            if tag in _PropertiesCapsQueryBase._DEFAULT_PROPERTIES:
+                continue  # Already in default query
+            if tag in _PropertiesCapsQueryBase._CAPABILITY_ONLY_TAGS:
                 continue  # B5-advertisement-only; never valid as a B1 query tag.
             if tag in properties_tags:
                 properties_query.append(tag)
             else:
                 additional_tags.append(tag)
-        # Sort each list, then extend params with both in sorted order
+
         properties_query.sort()
         additional_tags.sort()
-        # Merge both lists and sort together to maintain overall tag value order
-        appended_tags = properties_query + additional_tags
-        appended_tags.sort()
-        params.extend(appended_tags)
-        if not self._build_logged:
-            self._build_logged = True
-            _LOGGER.debug(
-                "PropertiesQuery build: default_properties=%s "
-                "capability_properties=%s additional_tags=%s capabilities=%s",
-                [CapabilityTag(tag).name for tag in default_tags],
-                [tag.name for tag in properties_query],
-                [tag.name for tag in additional_tags],
-                self._capabilities,
-            )
+        all_tags = properties_query + additional_tags
+        return [int(tag) for tag in all_tags]
 
-        _body = bytearray([len(params)])
-        for param in params:
-            _body.extend([param & 0xFF, param >> 8])
-        return _body
+
+class PropertiesCapsQuery1(_PropertiesCapsQueryBase):
+    """First batch of capability-based properties (properties 0-11).
+
+    This query handles the first batch of up to 12 capability-based properties.
+    It has a unique class name so it can be independently disabled if unsupported.
+    """
+
+
+class PropertiesCapsQuery2(_PropertiesCapsQueryBase):
+    """Second batch of capability-based properties (properties 12-23).
+
+    This query handles the second batch of up to 12 capability-based properties.
+    It has a unique class name so it can be independently disabled if unsupported.
+    """
+
+
+class PropertiesCapsQuery3(_PropertiesCapsQueryBase):
+    """Third batch of capability-based properties (properties 24-35).
+
+    This query handles the third batch of up to 12 capability-based properties.
+    It has a unique class name so it can be independently disabled if unsupported.
+    """
 
 
 class MessageSubProtocol(MessageACBase):

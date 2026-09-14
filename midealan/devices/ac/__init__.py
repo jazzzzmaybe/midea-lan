@@ -23,7 +23,10 @@ from .message import (
     MessageACResponse,
     MessageSubProtocolSet,
     PowerQuery,
-    PropertiesQuery,
+    PropertiesCapsQuery1,
+    PropertiesCapsQuery2,
+    PropertiesCapsQuery3,
+    PropertiesDefaultQuery,
     PropertiesSet,
     StateQuery,
     StateSet,
@@ -33,6 +36,7 @@ from .message import (
     SubProtocolQuery11,
     SubProtocolQuery30,
     ToggleDisplay,
+    _PropertiesCapsQueryBase,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -40,7 +44,10 @@ _LOGGER = logging.getLogger(__name__)
 ACQuery = (
     SubProtocolQuery
     | StateQuery
-    | PropertiesQuery
+    | PropertiesDefaultQuery
+    | PropertiesCapsQuery1
+    | PropertiesCapsQuery2
+    | PropertiesCapsQuery3
     | PowerQuery
     | HumidityQuery
     | GroupZeroQuery
@@ -425,29 +432,106 @@ class MideaACDevice(MideaDevice):
                 SubProtocolQuery11(self._message_protocol_version),
                 SubProtocolQuery30(self._message_protocol_version),
             ]
+
         queries: list[ACQuery] = [
             StateQuery(self._message_protocol_version),
-            # Single new-protocol query. Status feature tags (self_clean,
-            # rate_select, ...) are appended by PropertiesQuery automatically
-            # from the merged capabilities map (B5-parsed values overlaid with
-            # customize overrides), so an unsupported tag can't make the device
-            # return an empty list that suppresses the other tags.
-            PropertiesQuery(
-                self._message_protocol_version,
-                capabilities=self.capabilities,
-            ),
-            PowerQuery(self._message_protocol_version),
-            HumidityQuery(self._message_protocol_version),
-            GroupZeroQuery(self._message_protocol_version),
-            # Devices that do not answer a group query are detected during the
-            # initial protocol check and the query is skipped from then on.
-            GroupOneQuery(self._message_protocol_version),
-            GroupTwoQuery(self._message_protocol_version),
-            GroupSevenQuery(self._message_protocol_version),
-            # Capability queries are not part of the recurring status cycle. They
-            # run once at connect time via build_init_query() while the
-            # _capability_query / _capability_addition_query flags are set.
+            # Split new-protocol queries into independent batches to avoid the
+            # 12-property device limit and to prevent an unsupported capability
+            # property from suppressing default properties.
+            # See https://github.com/wuwentao/midea_ac_lan/issues/1031
+            # Default properties query (8 tags) - always included
+            PropertiesDefaultQuery(self._message_protocol_version),
         ]
+
+        # Dynamically build capability-based properties queries
+        # Collect all capability properties and split into batches of 12
+        all_caps_properties = _PropertiesCapsQueryBase.collect_capability_properties(
+            self.capabilities,
+        )
+
+        # Maximum properties per batch to avoid device limits
+        max_props_per_batch = 12
+        batch_1_start = 0
+        batch_2_start = 12
+        batch_3_start = 24
+        batch_3_end = 36
+
+        if all_caps_properties:
+            num_batches = (
+                len(all_caps_properties) + max_props_per_batch - 1
+            ) // max_props_per_batch
+            _LOGGER.debug(
+                "[%s] B1 query split: %d default properties + %d capability "
+                "properties across %d batch(es)",
+                self._device_id,
+                8,  # len(_default_properties)
+                len(all_caps_properties),
+                num_batches,
+            )
+
+            # Batch 1: properties 0-11
+            if len(all_caps_properties) > batch_1_start:
+                batch1 = all_caps_properties[batch_1_start:batch_2_start]
+                queries.append(
+                    PropertiesCapsQuery1(
+                        self._message_protocol_version,
+                        properties_subset=batch1,
+                    ),
+                )
+
+            # Batch 2: properties 12-23
+            if len(all_caps_properties) > batch_2_start:
+                batch2 = all_caps_properties[batch_2_start:batch_3_start]
+                queries.append(
+                    PropertiesCapsQuery2(
+                        self._message_protocol_version,
+                        properties_subset=batch2,
+                    ),
+                )
+
+            # Batch 3: properties 24-35
+            if len(all_caps_properties) > batch_3_start:
+                batch3 = all_caps_properties[batch_3_start:batch_3_end]
+                queries.append(
+                    PropertiesCapsQuery3(
+                        self._message_protocol_version,
+                        properties_subset=batch3,
+                    ),
+                )
+
+                # Warn if still exceeding capacity
+                if len(all_caps_properties) > batch_3_end:
+                    _LOGGER.warning(
+                        "[%s] Capability properties exceed %d (found %d), "
+                        "truncating to 3 batches",
+                        self._device_id,
+                        batch_3_end,
+                        len(all_caps_properties),
+                    )
+        else:
+            _LOGGER.debug(
+                "[%s] B1 query split: %d default properties only "
+                "(no capability properties)",
+                self._device_id,
+                8,  # len(_default_properties)
+            )
+
+        queries.extend(
+            [
+                PowerQuery(self._message_protocol_version),
+                HumidityQuery(self._message_protocol_version),
+                GroupZeroQuery(self._message_protocol_version),
+                # Devices that do not answer a group query are detected during the
+                # initial protocol check and the query is skipped from then on.
+                GroupOneQuery(self._message_protocol_version),
+                GroupTwoQuery(self._message_protocol_version),
+                GroupSevenQuery(self._message_protocol_version),
+                # Capability queries are not part of the recurring status cycle. They
+                # run once at connect time via build_init_query() while the
+                # _capability_query / _capability_addition_query flags are set.
+            ],
+        )
+
         return queries
 
     def build_init_query(self) -> list[ACQuery]:

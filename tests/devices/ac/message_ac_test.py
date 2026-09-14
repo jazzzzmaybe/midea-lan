@@ -11,6 +11,7 @@ from midealan.devices.ac.message import (
     CapabilitiesQuery,
     CapabilityBody,
     CapabilityTag,
+    CapabilityValue,
     GroupDataQuery,
     GroupOneQuery,
     GroupSevenQuery,
@@ -25,7 +26,10 @@ from midealan.devices.ac.message import (
     MessageSubProtocolSet,
     PowerFormats,
     PowerQuery,
-    PropertiesQuery,
+    PropertiesCapsQuery1,
+    PropertiesCapsQuery2,
+    PropertiesCapsQuery3,
+    PropertiesDefaultQuery,
     PropertiesSet,
     StateQuery,
     StateSet,
@@ -34,6 +38,7 @@ from midealan.devices.ac.message import (
     SubProtocolQuery11,
     SubProtocolQuery30,
     ToggleDisplay,
+    _PropertiesCapsQueryBase,
 )
 from midealan.message import ListTypes, MessageBase, MessageType
 
@@ -261,14 +266,9 @@ class TestToggleDisplay:
 class TestNewProtocolQuery:
     """Test Message New Protocol Query."""
 
-    def test_new_protocol_query_body(self) -> None:
-        """Test new protocol query body excludes rate_select by default.
-
-        rate_select is only queried once the device has advertised support
-        via the B5 b5_electricity capability; devices that never advertise it
-        don't answer the query.
-        """
-        msg = PropertiesQuery(protocol_version=ProtocolVersion.V1)
+    def test_default_query_body(self) -> None:
+        """Test default properties query body contains only the 8 base properties."""
+        msg = PropertiesDefaultQuery(protocol_version=ProtocolVersion.V1)
         expected_body = bytearray(
             [
                 0xB1,
@@ -289,41 +289,31 @@ class TestNewProtocolQuery:
                 CapabilityTag.wind_lr_angle >> 8,
                 CapabilityTag.wind_ud_angle & 0xFF,
                 CapabilityTag.wind_ud_angle >> 8,
-                # CapabilityTag.error_code & 0xFF,
-                # CapabilityTag.error_code >> 8,
             ],
         )
 
         assert msg.body[:-2] == expected_body
 
-    def test_new_protocol_query_body_includes_rate_select_when_supported(
-        self,
-    ) -> None:
-        """Test rate_select is appended once the capabilities map confirms it."""
-        msg = PropertiesQuery(
+    def test_caps_query_empty_when_no_capabilities(self) -> None:
+        """Test caps query returns empty body when no properties provided."""
+        msg = PropertiesCapsQuery1(
             protocol_version=ProtocolVersion.V1,
-            capabilities={"rate_select": 1},
+            properties_subset=None,
+        )
+        expected_body = bytearray([0xB1, 0x00])  # B1 type, 0 params
+
+        assert msg.body[:-2] == expected_body
+
+    def test_caps_query_includes_rate_select(self) -> None:
+        """Test caps query includes rate_select when provided."""
+        msg = PropertiesCapsQuery1(
+            protocol_version=ProtocolVersion.V1,
+            properties_subset=[CapabilityTag.rate_select],
         )
         expected_body = bytearray(
             [
                 0xB1,
-                0x09,  # params count (8 default + rate_select)
-                CapabilityTag.indirect_wind & 0xFF,
-                CapabilityTag.indirect_wind >> 8,
-                CapabilityTag.breezeless & 0xFF,
-                CapabilityTag.breezeless >> 8,
-                CapabilityTag.indoor_humidity & 0xFF,
-                CapabilityTag.indoor_humidity >> 8,
-                CapabilityTag.screen_display & 0xFF,
-                CapabilityTag.screen_display >> 8,
-                CapabilityTag.fresh_air_1 & 0xFF,
-                CapabilityTag.fresh_air_1 >> 8,
-                CapabilityTag.fresh_air_2 & 0xFF,
-                CapabilityTag.fresh_air_2 >> 8,
-                CapabilityTag.wind_lr_angle & 0xFF,
-                CapabilityTag.wind_lr_angle >> 8,
-                CapabilityTag.wind_ud_angle & 0xFF,
-                CapabilityTag.wind_ud_angle >> 8,
+                0x01,  # params count
                 CapabilityTag.rate_select & 0xFF,
                 CapabilityTag.rate_select >> 8,
             ],
@@ -331,214 +321,169 @@ class TestNewProtocolQuery:
 
         assert msg.body[:-2] == expected_body
 
-    def test_new_protocol_query_body_includes_self_clean_when_supported(
-        self,
-    ) -> None:
-        """Test self_clean is appended when the capabilities map confirms it."""
-        msg = PropertiesQuery(
+    def test_caps_query_includes_multiple_properties(self) -> None:
+        """Test caps query includes multiple properties when provided."""
+        msg = PropertiesCapsQuery1(
             protocol_version=ProtocolVersion.V1,
-            capabilities={"self_clean": True},
+            properties_subset=[
+                CapabilityTag.self_clean,
+                CapabilityTag.rate_select,
+                CapabilityTag.sound,
+            ],
         )
         expected_body = bytearray(
             [
                 0xB1,
-                0x09,  # params count (8 default + self_clean)
-                CapabilityTag.indirect_wind & 0xFF,
-                CapabilityTag.indirect_wind >> 8,
-                CapabilityTag.breezeless & 0xFF,
-                CapabilityTag.breezeless >> 8,
-                CapabilityTag.indoor_humidity & 0xFF,
-                CapabilityTag.indoor_humidity >> 8,
-                CapabilityTag.screen_display & 0xFF,
-                CapabilityTag.screen_display >> 8,
-                CapabilityTag.fresh_air_1 & 0xFF,
-                CapabilityTag.fresh_air_1 >> 8,
-                CapabilityTag.fresh_air_2 & 0xFF,
-                CapabilityTag.fresh_air_2 >> 8,
-                CapabilityTag.wind_lr_angle & 0xFF,
-                CapabilityTag.wind_lr_angle >> 8,
-                CapabilityTag.wind_ud_angle & 0xFF,
-                CapabilityTag.wind_ud_angle >> 8,
+                0x03,  # params count
                 CapabilityTag.self_clean & 0xFF,
                 CapabilityTag.self_clean >> 8,
+                CapabilityTag.rate_select & 0xFF,
+                CapabilityTag.rate_select >> 8,
+                CapabilityTag.sound & 0xFF,
+                CapabilityTag.sound >> 8,
             ],
         )
 
         assert msg.body[:-2] == expected_body
 
-    def test_new_protocol_query_body_appends_optional_tags_in_order(self) -> None:
-        """Test both optional tags append in sorted (by tag value) order."""
-        msg = PropertiesQuery(
+    def test_caps_query_max_12_properties(self) -> None:
+        """Test caps query can handle up to 12 properties."""
+        properties = [
+            int(CapabilityTag.self_clean),
+            int(CapabilityTag.rate_select),
+            int(CapabilityTag.out_silent),
+            int(CapabilityTag.ieco),
+            int(CapabilityTag.sound),
+            int(CapabilityTag.error_code),
+            int(CapabilityTag.temperature),
+            int(CapabilityTag.extreme_wind),
+            int(CapabilityTag.water_washing),
+            int(CapabilityTag.even_wind),
+            int(CapabilityTag.gentle_wind_sense),
+            int(CapabilityTag.intelligent_wind),
+        ]
+        msg = PropertiesCapsQuery1(
             protocol_version=ProtocolVersion.V1,
-            capabilities={"rate_select": 2, "self_clean": True},
-        )
-        # Appended status tags come after the fixed base list, sorted by tag
-        # value regardless of dict insertion order: self_clean (0x39) first,
-        # then rate_select (0x48).
-        assert msg.body[:-2][-4:] == bytearray(
-            [
-                CapabilityTag.self_clean & 0xFF,
-                CapabilityTag.self_clean >> 8,
-                CapabilityTag.rate_select & 0xFF,
-                CapabilityTag.rate_select >> 8,
-            ],
-        )
-
-    def test_new_protocol_query_body_omits_optional_tags_when_falsy(self) -> None:
-        """Test falsy capability values keep the optional tags out of the body."""
-        msg = PropertiesQuery(
-            protocol_version=ProtocolVersion.V1,
-            capabilities={"self_clean": False, "rate_select": 0},
+            properties_subset=properties,
         )
         params_count = msg.body[1]
-        assert params_count == len(PropertiesQuery._default_properties)
-        assert CapabilityTag.self_clean not in msg.body
-        assert CapabilityTag.rate_select not in msg.body
+        assert params_count == 12
 
-    def test_new_protocol_query_body_appends_all_known_tags(self) -> None:
-        """Test any truthy capability key naming a CapabilityTag member appends.
+    def test_collect_capability_properties_empty(self) -> None:
+        """Test collect returns empty list when no capabilities."""
+        result = _PropertiesCapsQueryBase.collect_capability_properties({})
+        assert result == []
 
-        Capability keys are appended whenever they name a CapabilityTag
-        member and are truthy, sorted by tag value. Keys already in the default
-        list are not duplicated. Capability-only tags (poisoners) are blocked.
-        """
-        msg = PropertiesQuery(
-            protocol_version=ProtocolVersion.V1,
-            capabilities={
-                "temperature": 34,
-                "eco": True,  # capability-only, blocked
-                "humidity": 1,  # capability-only, blocked
-                "filter_remind": 1,  # capability-only, blocked
-                "sound": 1,  # not default anymore, appends
-                "self_clean": True,  # valid additional tag
-            },
-        )
-        params_count = msg.body[1]
-        # Only 3 tags appended: self_clean (0x0039), temperature (0x0225),
-        # sound (0x022C). eco/filter_remind/humidity are blocked.
-        assert params_count == len(PropertiesQuery._default_properties) + 3
-        # Appended tags come after the default list, sorted by value:
-        # self_clean 0x0039, temperature 0x0225, sound 0x022C.
-        assert msg.body[:-2][-6:] == bytearray(
-            [
-                CapabilityTag.self_clean & 0xFF,
-                CapabilityTag.self_clean >> 8,
-                CapabilityTag.temperature & 0xFF,
-                CapabilityTag.temperature >> 8,
-                CapabilityTag.sound & 0xFF,
-                CapabilityTag.sound >> 8,
-            ],
-        )
+    def test_collect_capability_properties_filters_default(self) -> None:
+        """Test collect excludes default properties."""
+        caps: dict[str, CapabilityValue] = {
+            "fresh_air_1": True,  # default property, should be excluded
+            "fresh_air_2": True,  # default property, should be excluded
+            "self_clean": True,  # capability property, should be included
+        }
+        result = _PropertiesCapsQueryBase.collect_capability_properties(caps)
+        assert CapabilityTag.self_clean in result
+        assert CapabilityTag.fresh_air_1 not in result
+        assert CapabilityTag.fresh_air_2 not in result
 
-    def test_new_protocol_query_body_ignores_unknown_capability_keys(self) -> None:
-        """Test capability keys that name no CapabilityTag member are skipped.
+    def test_collect_capability_properties_filters_capability_only_tags(
+        self,
+    ) -> None:
+        """Test collect blocks capability-only poisoners."""
+        caps: dict[str, CapabilityValue] = {
+            "eco": True,  # capability-only, should be blocked
+            "humidity": 1,  # capability-only, should be blocked
+            "filter_remind": 1,  # capability-only, should be blocked
+            "self_clean": True,  # valid, should be included
+        }
+        result = _PropertiesCapsQueryBase.collect_capability_properties(caps)
+        assert CapabilityTag.self_clean in result
+        assert CapabilityTag.eco not in result
+        assert CapabilityTag.humidity not in result
+        assert CapabilityTag.filter_remind not in result
 
-        Manually-parsed capability keys (modes, swing_modes, fan_speeds, ...)
-        are not tag names and must not raise or be appended to the query.
-        """
-        msg = PropertiesQuery(
-            protocol_version=ProtocolVersion.V1,
-            capabilities={
-                "modes": ["heat", "cool"],
-                "swing_modes": ["horizontal"],
-                "fan_speeds": ["low"],
-            },
-        )
-        params_count = msg.body[1]
-        assert params_count == len(PropertiesQuery._default_properties)
+    def test_collect_capability_properties_skips_falsy(self) -> None:
+        """Test collect skips falsy values."""
+        caps: dict[str, CapabilityValue] = {
+            "self_clean": False,
+            "rate_select": 0,
+            "sound": 1,  # only this should be included
+        }
+        result = _PropertiesCapsQueryBase.collect_capability_properties(caps)
+        assert result == [CapabilityTag.sound]
 
-    def test_new_protocol_query_body_blocks_capability_only_poisoners(self) -> None:
-        """Test B5-only poisoner tags never appear in B1 query even when truthy.
+    def test_collect_capability_properties_sorted(self) -> None:
+        """Test collect returns sorted list."""
+        caps: dict[str, CapabilityValue] = {
+            "sound": 1,  # 0x022C
+            "self_clean": True,  # 0x0039
+            "rate_select": 2,  # 0x0048
+        }
+        result = _PropertiesCapsQueryBase.collect_capability_properties(caps)
+        # Should be sorted by tag value
+        assert result == [
+            CapabilityTag.self_clean,  # 0x0039
+            CapabilityTag.rate_select,  # 0x0048
+            CapabilityTag.sound,  # 0x022C
+        ]
 
-        These 13 tags suppress the entire B1 response when queried (issue-987
-        class). They must never be auto-appended, even when the capabilities
-        dict echoes them from B5 parsing.
-        """
-        # All 13 capability-only tags from the blocklist.
-        msg = PropertiesQuery(
-            protocol_version=ProtocolVersion.V1,
-            capabilities={
-                "wind_speed": 1,
-                "eco": 1,
-                "b5_8_heat": 1,
-                "mode": 1,
-                "wind_swing": 1,
-                "electricity": 1,
-                "filter_remind": 1,
-                "ptc": 1,
-                "strong_wind": 1,
-                "humidity": 1,
-                "filter_check": 1,
-                "fahrenheit": 1,
-                "screen_display_capability": 1,
-            },
-        )
-        params_count = msg.body[1]
-        # None of the 13 poisoners should be appended.
-        assert params_count == len(PropertiesQuery._default_properties)
+    def test_collect_capability_properties_ignores_unknown_keys(self) -> None:
+        """Test collect ignores unknown capability keys."""
+        caps: dict[str, CapabilityValue] = {
+            "modes": ["heat", "cool"],
+            "swing_modes": ["horizontal"],
+            "self_clean": True,
+        }
+        result = _PropertiesCapsQueryBase.collect_capability_properties(caps)
+        assert result == [CapabilityTag.self_clean]
 
-    def test_new_protocol_query_sound_appends_when_b5_advertises(self) -> None:
-        """Test sound appends when B5 capability parsing sets it to True."""
-        msg = PropertiesQuery(
-            protocol_version=ProtocolVersion.V1,
-            capabilities={"sound": True},
-        )
-        params_count = msg.body[1]
-        assert params_count == len(PropertiesQuery._default_properties) + 1
-        assert msg.body[:-2][-2:] == bytearray(
-            [
-                CapabilityTag.sound & 0xFF,
-                CapabilityTag.sound >> 8,
-            ],
-        )
+    def test_different_caps_query_classes_have_unique_names(self) -> None:
+        """Test that different caps query classes have unique class names."""
+        q1 = PropertiesCapsQuery1(ProtocolVersion.V1, properties_subset=[])
+        q2 = PropertiesCapsQuery2(ProtocolVersion.V1, properties_subset=[])
+        q3 = PropertiesCapsQuery3(ProtocolVersion.V1, properties_subset=[])
 
-    def test_new_protocol_query_out_silent_via_customize_only(self) -> None:
-        """Test out_silent appends only when explicitly set via customize caps."""
-        msg = PropertiesQuery(
-            protocol_version=ProtocolVersion.V1,
-            capabilities={"out_silent": True},
-        )
-        params_count = msg.body[1]
-        assert params_count == len(PropertiesQuery._default_properties) + 1
-        assert msg.body[:-2][-2:] == bytearray(
-            [
-                CapabilityTag.out_silent & 0xFF,
-                CapabilityTag.out_silent >> 8,
-            ],
-        )
+        assert q1.__class__.__name__ == "PropertiesCapsQuery1"
+        assert q2.__class__.__name__ == "PropertiesCapsQuery2"
+        assert q3.__class__.__name__ == "PropertiesCapsQuery3"
+        assert q1.__class__.__name__ != q2.__class__.__name__
+        assert q2.__class__.__name__ != q3.__class__.__name__
 
-    def test_new_protocol_query_error_code_via_customize_only(self) -> None:
-        """Test error_code appends only when explicitly set via customize caps."""
-        msg = PropertiesQuery(
-            protocol_version=ProtocolVersion.V1,
-            capabilities={"error_code": True},
+    def test_collect_blocks_all_capability_only_poisoners(self) -> None:
+        """Test all 13 capability-only poisoners are blocked."""
+        msg_caps: dict[str, CapabilityValue] = {
+            "wind_speed": 1,
+            "eco": 1,
+            "b5_8_heat": 1,
+            "mode": 1,
+            "wind_swing": 1,
+            "electricity": 1,
+            "filter_remind": 1,
+            "ptc": 1,
+            "strong_wind": 1,
+            "humidity": 1,
+            "filter_check": 1,
+            "fahrenheit": 1,
+            "screen_display_capability": 1,
+        }
+        # All 13 poisoners provided, but none should be appended
+        result = _PropertiesCapsQueryBase.collect_capability_properties(
+            msg_caps,
         )
-        params_count = msg.body[1]
-        assert params_count == len(PropertiesQuery._default_properties) + 1
-        assert msg.body[:-2][-2:] == bytearray(
-            [
-                CapabilityTag.error_code & 0xFF,
-                CapabilityTag.error_code >> 8,
-            ],
-        )
-
-    def test_new_protocol_query_dedup_default_tags(self) -> None:
-        """Test that a truthy capability key matching a default tag is skipped."""
-        # fresh_air_1 is in _default_properties; even if caps["fresh_air_1"]
-        # is truthy, it must not be appended a second time.
-        msg = PropertiesQuery(
-            protocol_version=ProtocolVersion.V1,
-            capabilities={"fresh_air_1": True},
-        )
-        params_count = msg.body[1]
-        # Count should equal defaults (no additional tag appended).
-        assert params_count == len(PropertiesQuery._default_properties)
-        # Verify fresh_air_1 appears exactly once in the body.
-        tag_bytes = bytearray(
-            [CapabilityTag.fresh_air_1 & 0xFF, CapabilityTag.fresh_air_1 >> 8],
-        )
-        body_hex = msg.body[:-2].hex()
-        assert body_hex.count(tag_bytes.hex()) == 1
+        # Verify none of the 13 poisoners are in the result
+        assert CapabilityTag.wind_speed not in result
+        assert CapabilityTag.eco not in result
+        assert CapabilityTag.b5_8_heat not in result
+        assert CapabilityTag.mode not in result
+        assert CapabilityTag.wind_swing not in result
+        assert CapabilityTag.electricity not in result
+        assert CapabilityTag.filter_remind not in result
+        assert CapabilityTag.ptc not in result
+        assert CapabilityTag.strong_wind not in result
+        assert CapabilityTag.humidity not in result
+        assert CapabilityTag.filter_check not in result
+        assert CapabilityTag.fahrenheit not in result
+        assert CapabilityTag.screen_display_capability not in result
 
 
 class TestCapabilityBodyParsing:
@@ -573,11 +518,10 @@ class TestCapabilityBodyParsing:
         assert "eco" in caps
         assert "filter_remind" in caps
 
-        # Now build a query with those capabilities.
-        msg = PropertiesQuery(protocol_version=ProtocolVersion.V1, capabilities=caps)
-        params_count = msg.body[1]
-        # Neither eco nor filter_remind should be in the query (blocked).
-        assert params_count == len(PropertiesQuery._default_properties)
+        # Now verify they don't leak into capability properties collection
+        result = _PropertiesCapsQueryBase.collect_capability_properties(caps)
+        assert CapabilityTag.eco not in result
+        assert CapabilityTag.filter_remind not in result
 
     def test_b5_sound_presence_yields_true_capability(self) -> None:
         """Test B5 sound presence sets caps['sound'] = True."""
@@ -597,10 +541,9 @@ class TestCapabilityBodyParsing:
         # Presence sets sound to True regardless of raw[0].
         assert caps.get("sound") is True
 
-        # Query with this capability should include sound.
-        msg = PropertiesQuery(protocol_version=ProtocolVersion.V1, capabilities=caps)
-        params_count = msg.body[1]
-        assert params_count == len(PropertiesQuery._default_properties) + 1
+        # Verify sound is collected as a capability property
+        result = _PropertiesCapsQueryBase.collect_capability_properties(caps)
+        assert CapabilityTag.sound in result
 
 
 class TestNewProtocolSetOutSilent:
