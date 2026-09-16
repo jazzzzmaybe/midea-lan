@@ -485,13 +485,18 @@ class ToggleDisplay(MessageACBase):
 # Module-level shared constants for B1 query splitting.
 #
 # The single CapabilityTag enum above holds every known new-protocol tag. The
-# three frozensets below classify those tags into the datasets that drive B1
+# frozensets below classify those tags into the datasets that document B1
 # querying. Because Python IntEnum cannot inherit members, the categories are
 # expressed as frozensets over the one master enum rather than as separate
 # enums.
+#
+# NOTE (reason-2 experiment): this branch keeps the PROPERTIES_TAGS allowlist
+# (so capability-only tags are never queried over B1) but drops batching and
+# the default-property exclusion. collect_capability_properties() gathers every
+# advertised B1 property tag into a single PropertiesCapsQuery to reproduce
+# issue #1031 with a large tag count.
 
-# COMMON_TAGS: tags valid as both a B5 capability and a B1 property. Shared base
-# included by both PROPERTIES_TAGS and (by exclusion) CAPABILITY_ONLY_TAGS.
+# COMMON_TAGS: tags valid as both a B5 capability and a B1 property.
 COMMON_TAGS: frozenset[int] = frozenset(
     {
         CapabilityTag.wind_ud_angle,  # 0x0009
@@ -511,9 +516,9 @@ COMMON_TAGS: frozenset[int] = frozenset(
     },
 )
 
-# PROPERTIES_TAGS: the B1 allowlist. Only these tags are ever placed in a B1
-# query. COMMON_TAGS plus the property-only tags below, all parsed from B1
-# bodies and proven on real devices.
+# PROPERTIES_TAGS: the B1 allowlist. Only these tags may be placed in a B1
+# query. collect_capability_properties() filters advertised capabilities
+# against this set so capability-only tags are never queried over B1.
 PROPERTIES_TAGS: frozenset[int] = COMMON_TAGS | frozenset(
     {
         CapabilityTag.indoor_humidity,  # 0x0015
@@ -524,41 +529,8 @@ PROPERTIES_TAGS: frozenset[int] = COMMON_TAGS | frozenset(
     },
 )
 
-# CAPABILITY_ONLY_TAGS: tags that only ever appear in B5 capability
-# advertisements, never as valid B1 query tags. Devices reply with an empty
-# list when queried with one, suppressing all other tags in the same request.
-# COMMON_TAGS are intentionally excluded (they are also valid B1 properties).
-CAPABILITY_ONLY_TAGS: frozenset[int] = frozenset(
-    {
-        CapabilityTag.nobody_energy_save,  # 0x0030
-        CapabilityTag.wind_straight,  # 0x0032
-        CapabilityTag.wind_avoid,  # 0x0033
-        CapabilityTag.prevent_super_cool,  # 0x0049
-        CapabilityTag.parent_control,  # 0x0051
-        CapabilityTag.prevent_straight_wind_lr,  # 0x0058
-        CapabilityTag.degerming,  # 0x005A
-        CapabilityTag.temperature,  # 0x0225
-        CapabilityTag.twins_machine,  # 0x0232
-        CapabilityTag.body_check,  # 0x0234
-        CapabilityTag.wind_speed,  # 0x0210
-        CapabilityTag.eco,  # 0x0212
-        CapabilityTag.b5_8_heat,  # 0x0213
-        CapabilityTag.mode,  # 0x0214
-        CapabilityTag.wind_swing,  # 0x0215
-        CapabilityTag.electricity,  # 0x0216
-        CapabilityTag.filter_remind,  # 0x0217
-        CapabilityTag.ptc,  # 0x0219
-        CapabilityTag.strong_wind,  # 0x021A
-        CapabilityTag.humidity,  # 0x021F
-        CapabilityTag.filter_check,  # 0x0221
-        CapabilityTag.fahrenheit,  # 0x0222
-        CapabilityTag.screen_display_capability,  # 0x0224
-    },
-)
-
 # Default properties queried by PropertiesDefaultQuery (8 properties).
-# These are known to be supported by all new-protocol devices and are all
-# members of PROPERTIES_TAGS.
+# These are known to be supported by all new-protocol devices.
 _B1_DEFAULT_PROPERTIES: tuple[int, ...] = (
     int(CapabilityTag.indirect_wind),
     int(CapabilityTag.breezeless),
@@ -569,14 +541,6 @@ _B1_DEFAULT_PROPERTIES: tuple[int, ...] = (
     int(CapabilityTag.wind_lr_angle),
     int(CapabilityTag.wind_ud_angle),
 )
-
-# Maximum properties per B1 query batch.
-_B1_MAX_PROPERTIES_PER_BATCH = 11
-
-# Number of dynamic capability-property batches (PropertiesCapsQuery + ...1).
-# Two batches leave headroom above the current PROPERTIES_TAGS pool for future
-# property tags.
-_B1_MAX_CAPABILITY_BATCHES = 2
 
 
 def format_property_tags(tags: "list[int] | tuple[int, ...]") -> str:
@@ -619,12 +583,12 @@ class PropertiesDefaultQuery(MessageACBase):
         return _body
 
 
-class _PropertiesCapsQueryBase(MessageACBase):
-    """Base class for capability-based properties queries.
+class PropertiesCapsQuery(MessageACBase):
+    """Single capability properties query carrying every advertised tag.
 
-    Subclasses (PropertiesCapsQuery, PropertiesCapsQuery1) query capability-based
-    properties in separate batches to prevent an unsupported property from
-    suppressing default properties.
+    Reason-2 experiment: this query carries every advertised B1 property tag
+    (filtered against the PROPERTIES_TAGS allowlist) in a single B1 request,
+    with no batching, to reproduce issue #1031 with a large tag count.
     """
 
     def __init__(
@@ -638,7 +602,7 @@ class _PropertiesCapsQueryBase(MessageACBase):
         Args:
             protocol_version: Protocol version.
             properties_subset: List of capability property tags (as integers)
-                to include in this query batch.
+                to include in this query.
 
         """
         super().__init__(
@@ -662,13 +626,15 @@ class _PropertiesCapsQueryBase(MessageACBase):
     ) -> list[int]:
         """Collect capability properties from capabilities dict.
 
-        Returns a sorted list of capability property tag integers that should
-        be queried based on the device's advertised capabilities.
-
-        Uses an allowlist model: a tag is collected only if it is a member of
-        PROPERTIES_TAGS (the B1-queryable allowlist) and is not already in
-        _B1_DEFAULT_PROPERTIES (queried by PropertiesDefaultQuery). Any tag not
-        in PROPERTIES_TAGS (capability-only or unknown) is never queried in B1.
+        Reason-2 experiment: returns a sorted list of advertised capability
+        tags that are valid B1 properties. A tag is kept only if it is a member
+        of PROPERTIES_TAGS (the B1-queryable allowlist); capability-only tags
+        (e.g. eco, mode, temperature) are excluded so they are never queried
+        over B1. Default properties are NOT excluded, so tags already in
+        PropertiesDefaultQuery are included here as well. The goal is to flood a
+        single B1 query with more than 11-12 valid property tags and see whether
+        issue #1031 still reproduces, isolating whether the trigger is the tag
+        count itself rather than an unsupported/mixed-in tag.
 
         Args:
             capabilities: Device capabilities dict from B5 + customize.
@@ -678,7 +644,6 @@ class _PropertiesCapsQueryBase(MessageACBase):
 
         """
         properties: list[int] = []
-        default_tags = frozenset(_B1_DEFAULT_PROPERTIES)
 
         for key, value in capabilities.items():
             if not value:
@@ -689,19 +654,9 @@ class _PropertiesCapsQueryBase(MessageACBase):
                 continue  # Not a valid tag name
             if tag not in PROPERTIES_TAGS:
                 continue  # Not a B1-queryable property (capability-only)
-            if tag in default_tags:
-                continue  # Already in default query
             properties.append(tag)
 
         return sorted(properties)
-
-
-class PropertiesCapsQuery(_PropertiesCapsQueryBase):
-    """First dynamic capability properties query batch."""
-
-
-class PropertiesCapsQuery1(_PropertiesCapsQueryBase):
-    """Second dynamic capability properties query batch."""
 
 
 class MessageSubProtocol(MessageACBase):

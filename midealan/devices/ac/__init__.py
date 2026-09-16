@@ -12,8 +12,6 @@ from midealan.device import MideaDevice, MideaDeviceInitKwargs
 from midealan.message import ListTypes
 
 from .message import (
-    _B1_MAX_CAPABILITY_BATCHES,
-    _B1_MAX_PROPERTIES_PER_BATCH,
     CapabilitiesAdditionalQuery,
     CapabilitiesQuery,
     CapabilityValue,
@@ -26,7 +24,6 @@ from .message import (
     MessageSubProtocolSet,
     PowerQuery,
     PropertiesCapsQuery,
-    PropertiesCapsQuery1,
     PropertiesDefaultQuery,
     PropertiesSet,
     StateQuery,
@@ -37,7 +34,6 @@ from .message import (
     SubProtocolQuery11,
     SubProtocolQuery30,
     ToggleDisplay,
-    _PropertiesCapsQueryBase,
     format_property_tags,
 )
 
@@ -48,7 +44,6 @@ ACQuery = (
     | StateQuery
     | PropertiesDefaultQuery
     | PropertiesCapsQuery
-    | PropertiesCapsQuery1
     | PowerQuery
     | HumidityQuery
     | GroupZeroQuery
@@ -447,53 +442,28 @@ class MideaACDevice(MideaDevice):
             format_property_tags(default_query.properties),
         )
 
-        # Dynamically build capability-based properties queries
-        # Collect all capability properties and split into batches
-        all_caps_properties = _PropertiesCapsQueryBase.collect_capability_properties(
+        # Reason-2 experiment: collect EVERY advertised capability property and
+        # put them all in a single PropertiesCapsQuery (no batching, no
+        # allowlist filtering, defaults included). This deliberately pushes the
+        # tag count well above 11-12 to check whether issue #1031 still
+        # reproduces, isolating whether the trigger is the tag count itself or
+        # an unsupported/mixed-in tag.
+        all_caps_properties = PropertiesCapsQuery.collect_capability_properties(
             self.capabilities,
         )
 
         if all_caps_properties:
-            capacity = _B1_MAX_PROPERTIES_PER_BATCH * _B1_MAX_CAPABILITY_BATCHES
-            num_batches = min(
-                (len(all_caps_properties) + _B1_MAX_PROPERTIES_PER_BATCH - 1)
-                // _B1_MAX_PROPERTIES_PER_BATCH,
-                _B1_MAX_CAPABILITY_BATCHES,
+            caps_query = PropertiesCapsQuery(
+                self._message_protocol_version,
+                properties_subset=all_caps_properties,
             )
-
-            # One class per dynamic batch, in order. Their count defines the
-            # capacity (_B1_MAX_CAPABILITY_BATCHES); extend both lists together
-            # to add headroom for future property tags.
-            batch_classes = (PropertiesCapsQuery, PropertiesCapsQuery1)
-            for index in range(num_batches):
-                start = index * _B1_MAX_PROPERTIES_PER_BATCH
-                subset = all_caps_properties[
-                    start : start + _B1_MAX_PROPERTIES_PER_BATCH
-                ]
-                batch_query = batch_classes[index](
-                    self._message_protocol_version,
-                    properties_subset=subset,
-                )
-                queries.append(batch_query)
-                _LOGGER.debug(
-                    "[%s] %s: %d properties [%s]",
-                    self._device_id,
-                    type(batch_query).__name__,
-                    len(batch_query.properties),
-                    format_property_tags(batch_query.properties),
-                )
-
-            # Warn if the pool exceeds total capacity; excess tags are dropped.
-            if len(all_caps_properties) > capacity:
-                _LOGGER.warning(
-                    "[%s] Capability properties exceed %d (found %d), "
-                    "truncating to %d batches: dropped [%s]",
-                    self._device_id,
-                    capacity,
-                    len(all_caps_properties),
-                    _B1_MAX_CAPABILITY_BATCHES,
-                    format_property_tags(all_caps_properties[capacity:]),
-                )
+            queries.append(caps_query)
+            _LOGGER.debug(
+                "[%s] PropertiesCapsQuery: %d properties [%s]",
+                self._device_id,
+                len(caps_query.properties),
+                format_property_tags(caps_query.properties),
+            )
         else:
             _LOGGER.debug(
                 "[%s] No capability properties to query (default properties only)",
