@@ -1041,6 +1041,55 @@ class TestMideaACDevice:
             self.device._used_subprotocol = True
             self.device.set_target_temperature(22.5, 1)
 
+    def test_a0_confirmed_low_setpoint_survives_c0_plus_one(self) -> None:
+        """C0 can report 16/16.5C as +1 after A0 confirmed the real value."""
+        a0_msg = SimpleNamespace(body_type=ListTypes.A0, target_temperature=16.5)
+        c0_msg = SimpleNamespace(body_type=ListTypes.C0, target_temperature=17.5)
+
+        with patch(
+            "midealan.devices.ac.MessageACResponse",
+            side_effect=[a0_msg, c0_msg],
+        ):
+            assert (
+                self.device.process_message(b"")[
+                    DeviceAttributes.target_temperature.value
+                ]
+                == 16.5
+            )
+            assert (
+                self.device.process_message(b"")[
+                    DeviceAttributes.target_temperature.value
+                ]
+                == 16.5
+            )
+
+        assert self.device.attributes[DeviceAttributes.target_temperature] == 16.5
+
+    def test_untrusted_c0_17_setpoint_is_left_unchanged(self) -> None:
+        """A plain C0 17.0 is still 17.0 without prior low-temperature truth."""
+        c0_msg = SimpleNamespace(body_type=ListTypes.C0, target_temperature=17.0)
+
+        with patch("midealan.devices.ac.MessageACResponse", return_value=c0_msg):
+            status = self.device.process_message(b"")
+
+        assert status[DeviceAttributes.target_temperature.value] == 17.0
+        assert self.device.attributes[DeviceAttributes.target_temperature] == 17.0
+
+    def test_commanded_low_setpoint_survives_immediate_c0_plus_one(self) -> None:
+        """A device advertising min 16 keeps the commanded value through C0."""
+        self.device._attributes[DeviceAttributes.min_temperature] = 16.0
+        c0_msg = SimpleNamespace(body_type=ListTypes.C0, target_temperature=17.0)
+
+        with (
+            patch.object(self.device, "build_send"),
+            patch("midealan.devices.ac.MessageACResponse", return_value=c0_msg),
+        ):
+            self.device.set_target_temperature(16.0, 2)
+            status = self.device.process_message(b"")
+
+        assert status[DeviceAttributes.target_temperature.value] == 16.0
+        assert self.device.attributes[DeviceAttributes.target_temperature] == 16.0
+
     def test_process_message_ignores_stale_c0_temperatures_after_new_protocol(
         self,
     ) -> None:

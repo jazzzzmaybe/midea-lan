@@ -180,6 +180,9 @@ STALE_C0_TEMPERATURE_ATTRIBUTES = (
     DeviceAttributes.indoor_temperature,
     DeviceAttributes.outdoor_temperature,
 )
+C0_LOW_SETPOINT_BOUNDARY = 17.0
+C0_LOW_SETPOINT_REPORT_OFFSET = 1.0
+C0_SETPOINT_TOLERANCE = 0.01
 
 
 class MideaACDevice(MideaDevice):
@@ -364,6 +367,9 @@ class MideaACDevice(MideaDevice):
         # Once 0x7e-derived temperatures are seen, ignore stale C0 temperature
         # fields to avoid brief UI flicker caused by query ordering.
         self._prefer_new_protocol_temperature: bool = False
+        # Some AC models report 16.0/16.5C setpoints as +1C in C0 query
+        # responses, while A0 notifications and the panel show the correct value.
+        self._trusted_low_target_temperature: float | None = None
         self.set_customize(customize)
 
     @property
@@ -552,6 +558,11 @@ class MideaACDevice(MideaDevice):
                 if is_stale_c0_temperature and attr in STALE_C0_TEMPERATURE_ATTRIBUTES:
                     continue
                 value = getattr(message, str(attr))
+                if attr == DeviceAttributes.target_temperature and isinstance(
+                    value,
+                    int | float,
+                ):
+                    value = self._resolve_target_temperature(body_type, float(value))
                 if attr == DeviceAttributes.fresh_air_power:
                     has_fresh_air = True
                 # wind_lr_angle
@@ -1137,6 +1148,41 @@ class MideaACDevice(MideaDevice):
             message = self.make_message_set()
         return message
 
+    def _resolve_target_temperature(
+        self,
+        body_type: ListTypes | None,
+        reported_temperature: float,
+    ) -> float:
+        """Keep confirmed 16/16.5C setpoints from being overwritten by C0 +1."""
+        if body_type == ListTypes.A0:
+            self._trusted_low_target_temperature = (
+                reported_temperature
+                if reported_temperature < C0_LOW_SETPOINT_BOUNDARY
+                else None
+            )
+            return reported_temperature
+
+        trusted_temperature = self._trusted_low_target_temperature
+        if body_type != ListTypes.C0 or trusted_temperature is None:
+            return reported_temperature
+
+        if (
+            abs(
+                reported_temperature
+                - (trusted_temperature + C0_LOW_SETPOINT_REPORT_OFFSET),
+            )
+            < C0_SETPOINT_TOLERANCE
+        ):
+            return trusted_temperature
+
+        if abs(reported_temperature - trusted_temperature) > C0_SETPOINT_TOLERANCE:
+            self._trusted_low_target_temperature = None
+        return reported_temperature
+
+    def _supports_low_target_temperature(self) -> bool:
+        minimum = self._attributes.get(DeviceAttributes.min_temperature)
+        return isinstance(minimum, int | float) and minimum < C0_LOW_SETPOINT_BOUNDARY
+
     def set_attribute(self, attr: str, value: bool | float | str) -> None:
         """Midea AC device set attribute."""
         # if nat a sensor
@@ -1273,6 +1319,12 @@ class MideaACDevice(MideaDevice):
         """Midea AC device set target temperature."""
         message: MessageSubProtocolSet | StateSet = self.make_message_uniq_set()
         message.target_temperature = target_temperature
+        self._trusted_low_target_temperature = (
+            target_temperature
+            if target_temperature < C0_LOW_SETPOINT_BOUNDARY
+            and self._supports_low_target_temperature()
+            else None
+        )
         if mode is not None:
             message.power = True
             message.mode = mode
