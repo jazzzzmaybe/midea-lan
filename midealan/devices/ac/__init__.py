@@ -1155,6 +1155,7 @@ class MideaACDevice(MideaDevice):
     ) -> float:
         """Keep confirmed 16/16.5C setpoints from being overwritten by C0 +1."""
         if body_type == ListTypes.A0:
+            # A0 is device-originated, so it can refresh low-setpoint truth.
             self._trusted_low_target_temperature = (
                 reported_temperature
                 if reported_temperature < C0_LOW_SETPOINT_BOUNDARY
@@ -1173,9 +1174,11 @@ class MideaACDevice(MideaDevice):
             )
             < C0_SETPOINT_TOLERANCE
         ):
+            # Only correct the known C0 +1C low-setpoint signature.
             return trusted_temperature
 
         if abs(reported_temperature - trusted_temperature) > C0_SETPOINT_TOLERANCE:
+            # A different C0 value means the previous low-setpoint trust is stale.
             self._trusted_low_target_temperature = None
         return reported_temperature
 
@@ -1315,15 +1318,16 @@ class MideaACDevice(MideaDevice):
         """Midea AC device set target temperature."""
         message: MessageSubProtocolSet | StateSet = self.make_message_uniq_set()
         message.target_temperature = target_temperature
+        if mode is not None:
+            message.power = True
+            message.mode = mode
+        self.build_send(message)
+        # Trust a requested low setpoint only after the command is sent.
         self._trusted_low_target_temperature = (
             target_temperature
             if target_temperature < C0_LOW_SETPOINT_BOUNDARY
             else None
         )
-        if mode is not None:
-            message.power = True
-            message.mode = mode
-        self.build_send(message)
 
     def set_swing(self, swing_vertical: bool, swing_horizontal: bool) -> None:
         """Midea AC device set swing."""

@@ -1089,6 +1089,80 @@ class TestMideaACDevice:
         assert status[DeviceAttributes.target_temperature.value] == 16.0
         assert self.device.attributes[DeviceAttributes.target_temperature] == 16.0
 
+    def test_failed_low_setpoint_command_is_not_trusted(self) -> None:
+        """Do not trust a low setpoint that failed to send."""
+        with (
+            patch.object(self.device, "build_send", side_effect=RuntimeError),
+            pytest.raises(RuntimeError),
+        ):
+            self.device.set_target_temperature(16.0, 2)
+
+        assert self.device._trusted_low_target_temperature is None
+
+    def test_c0_mismatch_clears_trusted_low_setpoint(self) -> None:
+        """A non-signature C0 value clears stale low-setpoint trust."""
+        a0_msg = SimpleNamespace(body_type=ListTypes.A0, target_temperature=16.0)
+        mismatch_c0_msg = SimpleNamespace(
+            body_type=ListTypes.C0,
+            target_temperature=18.0,
+        )
+        untrusted_c0_msg = SimpleNamespace(
+            body_type=ListTypes.C0,
+            target_temperature=17.0,
+        )
+
+        with patch(
+            "midealan.devices.ac.MessageACResponse",
+            side_effect=[a0_msg, mismatch_c0_msg, untrusted_c0_msg],
+        ):
+            assert (
+                self.device.process_message(b"")[
+                    DeviceAttributes.target_temperature.value
+                ]
+                == 16.0
+            )
+            assert (
+                self.device.process_message(b"")[
+                    DeviceAttributes.target_temperature.value
+                ]
+                == 18.0
+            )
+            assert (
+                self.device.process_message(b"")[
+                    DeviceAttributes.target_temperature.value
+                ]
+                == 17.0
+            )
+
+        assert self.device._trusted_low_target_temperature is None
+
+    def test_matching_c0_keeps_trusted_low_setpoint(self) -> None:
+        """A matching C0 low value keeps the confirmed low-setpoint trust."""
+        a0_msg = SimpleNamespace(body_type=ListTypes.A0, target_temperature=16.0)
+        matching_c0_msg = SimpleNamespace(
+            body_type=ListTypes.C0,
+            target_temperature=16.0,
+        )
+
+        with patch(
+            "midealan.devices.ac.MessageACResponse",
+            side_effect=[a0_msg, matching_c0_msg],
+        ):
+            assert (
+                self.device.process_message(b"")[
+                    DeviceAttributes.target_temperature.value
+                ]
+                == 16.0
+            )
+            assert (
+                self.device.process_message(b"")[
+                    DeviceAttributes.target_temperature.value
+                ]
+                == 16.0
+            )
+
+        assert self.device._trusted_low_target_temperature == 16.0
+
     def test_process_message_ignores_stale_c0_temperatures_after_new_protocol(
         self,
     ) -> None:
