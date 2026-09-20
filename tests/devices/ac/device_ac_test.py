@@ -1076,8 +1076,7 @@ class TestMideaACDevice:
         assert self.device.attributes[DeviceAttributes.target_temperature] == 17.0
 
     def test_commanded_low_setpoint_survives_immediate_c0_plus_one(self) -> None:
-        """A device advertising min 16 keeps the commanded value through C0."""
-        self.device._attributes[DeviceAttributes.min_temperature] = 16.0
+        """A commanded low setpoint stays trusted even without B5 min capability."""
         c0_msg = SimpleNamespace(body_type=ListTypes.C0, target_temperature=17.0)
 
         with (

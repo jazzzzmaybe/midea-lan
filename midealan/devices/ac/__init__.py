@@ -1179,10 +1179,6 @@ class MideaACDevice(MideaDevice):
             self._trusted_low_target_temperature = None
         return reported_temperature
 
-    def _supports_low_target_temperature(self) -> bool:
-        minimum = self._attributes.get(DeviceAttributes.min_temperature)
-        return isinstance(minimum, int | float) and minimum < C0_LOW_SETPOINT_BOUNDARY
-
     def set_attribute(self, attr: str, value: bool | float | str) -> None:
         """Midea AC device set attribute."""
         # if nat a sensor
@@ -1322,7 +1318,6 @@ class MideaACDevice(MideaDevice):
         self._trusted_low_target_temperature = (
             target_temperature
             if target_temperature < C0_LOW_SETPOINT_BOUNDARY
-            and self._supports_low_target_temperature()
             else None
         )
         if mode is not None:
