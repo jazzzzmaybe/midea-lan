@@ -1105,6 +1105,35 @@ class TestMessageACResponse:
         )
         assert response.degerming_active is False
 
+    def test_b1_degerming_state_on_extended_payload(self) -> None:
+        """Test degerming on from the extended 0x7e payload variant.
+
+        Model 22019061 (COLMO KFR-50GW/CA3) reports a 55-byte 0x7e payload;
+        the same byte 19 bit 0x02 holds the state (captured with the feature
+        on).
+        """
+        response = MessageACResponse(
+            bytearray.fromhex(
+                "aa78ac00000000000803b10a4200000101180000010015000001351700000164330211004b00"
+                "0004002816000a00000100090000010039000001007e000037a01fa5647f7f0033000c000000"
+                "00000f000000f2000000e000000040000000003c00282835850e007200000000002000080000"
+                "00000000007592",
+            ),
+        )
+        assert response.degerming_active is True
+
+    def test_b1_degerming_state_off_extended_payload(self) -> None:
+        """Test degerming off from the extended 0x7e payload variant."""
+        response = MessageACResponse(
+            bytearray.fromhex(
+                "aa78ac00000000000803b10a4200000101180000010015000001331700000100330211004b00"
+                "0004002816000a00000164090000010039000001007e000037a01ea1647f7f0000000c000700"
+                "00000f009000f0000000e000000040000000003c00282833810e007009000000002000080000"
+                "0000000000e5c6",
+            ),
+        )
+        assert response.degerming_active is False
+
     def test_message_notify2_a0_short_body(self) -> None:
         """Skip Message parse notify2 A0 when the body is too short."""
         body = bytearray(A0_A1_C0_MIN_BODY_LENGTH)
