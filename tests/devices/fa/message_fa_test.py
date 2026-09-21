@@ -10,6 +10,10 @@ from midealan.devices.fa.message import (
     MessageNewSet,
     MessageQuery,
     MessageSet,
+    _get_bits,
+    _new_angle_to_code,
+    _parse_temperature,
+    _value_to_code,
 )
 from midealan.message import ListTypes, MessageType
 
@@ -90,6 +94,7 @@ class TestMessageSet:
         """Test set body lock."""
         msg = MessageSet(ProtocolVersion.V1, 1)
         msg.lock = lock
+        assert msg.lock is lock
         assert msg._body[2] == expected
 
     @pytest.mark.parametrize(
@@ -249,6 +254,23 @@ class TestMessageNewSet:
         assert body[6] == 0
         assert body[15] == 0
 
+    def test_body_optional_control_variants(self) -> None:
+        """Test special temperature, enum, and non-boolean control values."""
+        msg = MessageNewSet(ProtocolVersion.V1, 0)
+        msg.voice = 1
+        msg.target_temperature = 0x80
+        msg.oscillation_mode = "invalid"
+        msg.oscillation_angle = "Off"
+        msg.tilting_angle = "Off"
+        msg.humidify = 4
+
+        body = msg._body
+        assert body[1] == 1
+        assert body[5] == 0x80
+        assert body[8] == 0x40
+        assert body[50] == 0
+        assert body[24] == 0
+
     def test_body_defaults_match_lua_layout(self) -> None:
         """Test protocol marker and invalid-control defaults."""
         msg = MessageNewSet(ProtocolVersion.V1, 0)
@@ -278,6 +300,20 @@ class TestMessageNewSet:
 
         assert msg._body[7] == 0x02
         assert msg._body[50] == 0
+
+    def test_helper_edge_cases(self) -> None:
+        """Test protocol helper edge cases."""
+        assert _get_bits(bytearray(), 0, 0, 1) == 0
+        assert _parse_temperature(0x80) == 0x80
+        assert _parse_temperature(0) is None
+        assert _value_to_code(True, {}) == 1
+        assert _value_to_code(4, {}) == 4
+        assert _value_to_code("unknown", {1: "known"}) is None
+        assert _new_angle_to_code("Off") == 0
+        assert _new_angle_to_code("invalid") is None
+        assert _new_angle_to_code("60") == 12
+        assert _new_angle_to_code(1280) is None
+        assert _new_angle_to_code("60", {1: "60"}) == 1
 
     def test_body_horizontal_angle_sets_default_direction(self) -> None:
         """Test a horizontal angle uses the Lua lr direction."""
