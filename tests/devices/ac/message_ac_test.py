@@ -1,37 +1,39 @@
 """Test ac message."""
 
+import logging
+
 import pytest
 
 from midealan.const import ProtocolVersion
 from midealan.crc8 import calculate
 from midealan.devices.ac.message import (
+    A1_MIN_BODY_LENGTH,
+    CapabilitiesQuery,
+    CapabilityBody,
+    CapabilityTag,
+    GroupDataQuery,
+    GroupOneQuery,
+    GroupSevenQuery,
+    GroupTwoQuery,
+    GroupZeroQuery,
+    HumidityQuery,
     MessageA0LongQuery,
     MessageA0Query,
     MessageACBase,
     MessageACResponse,
-    MessageCapabilitiesQuery,
-    MessageGeneralSet,
-    MessageGroupDataQuery,
-    MessageGroupOneQuery,
-    MessageGroupSevenQuery,
-    MessageGroupTwoQuery,
-    MessageGroupZeroQuery,
-    MessageHumidityQuery,
-    MessageNewProtocolQuery,
-    MessageNewProtocolSelfCleanQuery,
-    MessageNewProtocolSet,
-    MessagePowerQuery,
-    MessageQuery,
     MessageSubProtocol,
-    MessageSubProtocolFreshAirSet,
-    MessageSubProtocolQuery10,
-    MessageSubProtocolQuery11,
-    MessageSubProtocolQuery30,
     MessageSubProtocolSet,
-    MessageToggleDisplay,
-    NewProtocolQuery,
-    NewProtocolTags,
     PowerFormats,
+    PowerQuery,
+    PropertiesQuery,
+    PropertiesSet,
+    StateQuery,
+    StateSet,
+    SubProtocolFreshAirSet,
+    SubProtocolQuery10,
+    SubProtocolQuery11,
+    SubProtocolQuery30,
+    ToggleDisplay,
 )
 from midealan.message import ListTypes, MessageBase, MessageType
 
@@ -77,7 +79,7 @@ class TestMessageQuery:
 
     def test_query_body(self) -> None:
         """Test query body."""
-        msg = MessageQuery(protocol_version=ProtocolVersion.V1)
+        msg = StateQuery(protocol_version=ProtocolVersion.V1)
         expected_body = bytearray(
             [
                 0x41,
@@ -105,12 +107,12 @@ class TestMessageQuery:
         assert msg.body[:-2] == expected_body
 
 
-class TestMessageCapabilitiesQuery:
+class TestCapabilitiesQuery:
     """Test Message Capabilities Query."""
 
     def test_capabilities_query_body(self) -> None:
         """Test capabilities query body."""
-        msg = MessageCapabilitiesQuery(ProtocolVersion.V1, False)
+        msg = CapabilitiesQuery(ProtocolVersion.V1, False)
         expected_body = bytearray(
             [0xB5, 0x01, 0x00],
         )
@@ -118,7 +120,7 @@ class TestMessageCapabilitiesQuery:
 
     def test_capabilities_query_body_additional(self) -> None:
         """Test capabilities query body."""
-        msg = MessageCapabilitiesQuery(ProtocolVersion.V1, True)
+        msg = CapabilitiesQuery(ProtocolVersion.V1, True)
         expected_body = bytearray(
             [0xB5, 0x01, 0x01, 0x01],
         )
@@ -142,33 +144,33 @@ class TestMessageA0Query:
         assert msg.body[:-2] == expected_body
 
 
-class TestMessagePowerQuery:
+class TestPowerQuery:
     """Test Message Power Query."""
 
     def test_power_query_body(self) -> None:
         """Test power query body."""
-        msg = MessagePowerQuery(protocol_version=ProtocolVersion.V1)
+        msg = PowerQuery(protocol_version=ProtocolVersion.V1)
         expected_body = bytearray([0x41, 0x21, 0x01, 0x44, 0x00, 0x01])
         assert msg.body[:-1] == expected_body
 
 
-class TestMessageGroupDataQuery:
+class TestGroupDataQuery:
     """Test Message Group Data Query."""
 
     @pytest.mark.parametrize(
         ("message_class", "group"),
         [
-            (MessageGroupZeroQuery, 0),
-            (MessageGroupOneQuery, 1),
-            (MessageGroupTwoQuery, 2),
-            (MessagePowerQuery, 4),
-            (MessageHumidityQuery, 5),
-            (MessageGroupSevenQuery, 7),
+            (GroupZeroQuery, 0),
+            (GroupOneQuery, 1),
+            (GroupTwoQuery, 2),
+            (PowerQuery, 4),
+            (HumidityQuery, 5),
+            (GroupSevenQuery, 7),
         ],
     )
     def test_group_query_body(
         self,
-        message_class: type[MessageGroupDataQuery],
+        message_class: type[GroupDataQuery],
         group: int,
     ) -> None:
         """Test that every group query encodes its group number."""
@@ -177,32 +179,32 @@ class TestMessageGroupDataQuery:
         assert msg.body[:-1] == expected_body
 
 
-class TestMessageGroupZeroQuery:
+class TestGroupZeroQuery:
     """Test Message Group Zero Query."""
 
     def test_group_zero_query_body(self) -> None:
         """Test group zero query body."""
-        msg = MessageGroupZeroQuery(protocol_version=ProtocolVersion.V1)
+        msg = GroupZeroQuery(protocol_version=ProtocolVersion.V1)
         expected_body = bytearray([0x41, 0x21, 0x01, 0x40, 0x00, 0x01])
         assert msg.body[:-1] == expected_body
 
 
-class TestMessageHumidityQuery:
+class TestHumidityQuery:
     """Test Message Humidity Query."""
 
     def test_humidity_query_body(self) -> None:
         """Test humidity query body."""
-        msg = MessageHumidityQuery(protocol_version=ProtocolVersion.V1)
+        msg = HumidityQuery(protocol_version=ProtocolVersion.V1)
         expected_body = bytearray([0x41, 0x21, 0x01, 0x45, 0x00, 0x01])
         assert msg.body[:-1] == expected_body
 
 
-class TestMessageToggleDisplay:
+class TestToggleDisplay:
     """Test Message Toggle Display."""
 
     def test_toggle_disply_body(self) -> None:
         """Test toggle display body."""
-        msg = MessageToggleDisplay(protocol_version=ProtocolVersion.V1)
+        msg = ToggleDisplay(protocol_version=ProtocolVersion.V1)
         expected_body = bytearray(
             [
                 0x41,
@@ -256,7 +258,7 @@ class TestMessageToggleDisplay:
         assert msg.body[:-2] == expected_body
 
 
-class TestMessageNewProtocolQuery:
+class TestNewProtocolQuery:
     """Test Message New Protocol Query."""
 
     def test_new_protocol_query_body(self) -> None:
@@ -266,33 +268,29 @@ class TestMessageNewProtocolQuery:
         via the B5 b5_electricity capability; devices that never advertise it
         don't answer the query.
         """
-        msg = MessageNewProtocolQuery(protocol_version=ProtocolVersion.V1)
+        msg = PropertiesQuery(protocol_version=ProtocolVersion.V1)
         expected_body = bytearray(
             [
                 0xB1,
-                0x0B,
-                NewProtocolTags.indirect_wind & 0xFF,
-                NewProtocolTags.indirect_wind >> 8,
-                NewProtocolTags.breezeless & 0xFF,
-                NewProtocolTags.breezeless >> 8,
-                NewProtocolTags.indoor_humidity & 0xFF,
-                NewProtocolTags.indoor_humidity >> 8,
-                NewProtocolTags.screen_display & 0xFF,
-                NewProtocolTags.screen_display >> 8,
-                NewProtocolTags.fresh_air_1 & 0xFF,
-                NewProtocolTags.fresh_air_1 >> 8,
-                NewProtocolTags.fresh_air_2 & 0xFF,
-                NewProtocolTags.fresh_air_2 >> 8,
-                NewProtocolTags.wind_lr_angle & 0xFF,
-                NewProtocolTags.wind_lr_angle >> 8,
-                NewProtocolTags.wind_ud_angle & 0xFF,
-                NewProtocolTags.wind_ud_angle >> 8,
-                NewProtocolTags.out_silent & 0xFF,
-                NewProtocolTags.out_silent >> 8,
-                NewProtocolTags.buzzer_all & 0xFF,
-                NewProtocolTags.buzzer_all >> 8,
-                NewProtocolQuery.error_code_query & 0xFF,
-                NewProtocolQuery.error_code_query >> 8,
+                0x08,  # params count
+                CapabilityTag.indirect_wind & 0xFF,
+                CapabilityTag.indirect_wind >> 8,
+                CapabilityTag.breezeless & 0xFF,
+                CapabilityTag.breezeless >> 8,
+                CapabilityTag.indoor_humidity & 0xFF,
+                CapabilityTag.indoor_humidity >> 8,
+                CapabilityTag.screen_display & 0xFF,
+                CapabilityTag.screen_display >> 8,
+                CapabilityTag.fresh_air_1 & 0xFF,
+                CapabilityTag.fresh_air_1 >> 8,
+                CapabilityTag.fresh_air_2 & 0xFF,
+                CapabilityTag.fresh_air_2 >> 8,
+                CapabilityTag.wind_lr_angle & 0xFF,
+                CapabilityTag.wind_lr_angle >> 8,
+                CapabilityTag.wind_ud_angle & 0xFF,
+                CapabilityTag.wind_ud_angle >> 8,
+                # CapabilityTag.error_code & 0xFF,
+                # CapabilityTag.error_code >> 8,
             ],
         )
 
@@ -301,59 +299,311 @@ class TestMessageNewProtocolQuery:
     def test_new_protocol_query_body_includes_rate_select_when_supported(
         self,
     ) -> None:
-        """Test rate_select is appended once the device has advertised support."""
-        msg = MessageNewProtocolQuery(
+        """Test rate_select is appended once the capabilities map confirms it."""
+        msg = PropertiesQuery(
             protocol_version=ProtocolVersion.V1,
-            supports_rate_select=True,
+            capabilities={"rate_select": 1},
         )
         expected_body = bytearray(
             [
                 0xB1,
-                0x0C,
-                NewProtocolTags.indirect_wind & 0xFF,
-                NewProtocolTags.indirect_wind >> 8,
-                NewProtocolTags.breezeless & 0xFF,
-                NewProtocolTags.breezeless >> 8,
-                NewProtocolTags.indoor_humidity & 0xFF,
-                NewProtocolTags.indoor_humidity >> 8,
-                NewProtocolTags.screen_display & 0xFF,
-                NewProtocolTags.screen_display >> 8,
-                NewProtocolTags.fresh_air_1 & 0xFF,
-                NewProtocolTags.fresh_air_1 >> 8,
-                NewProtocolTags.fresh_air_2 & 0xFF,
-                NewProtocolTags.fresh_air_2 >> 8,
-                NewProtocolTags.wind_lr_angle & 0xFF,
-                NewProtocolTags.wind_lr_angle >> 8,
-                NewProtocolTags.wind_ud_angle & 0xFF,
-                NewProtocolTags.wind_ud_angle >> 8,
-                NewProtocolTags.out_silent & 0xFF,
-                NewProtocolTags.out_silent >> 8,
-                NewProtocolTags.buzzer_all & 0xFF,
-                NewProtocolTags.buzzer_all >> 8,
-                NewProtocolQuery.error_code_query & 0xFF,
-                NewProtocolQuery.error_code_query >> 8,
-                NewProtocolTags.rate_select & 0xFF,
-                NewProtocolTags.rate_select >> 8,
+                0x09,  # params count (8 default + rate_select)
+                CapabilityTag.indirect_wind & 0xFF,
+                CapabilityTag.indirect_wind >> 8,
+                CapabilityTag.breezeless & 0xFF,
+                CapabilityTag.breezeless >> 8,
+                CapabilityTag.indoor_humidity & 0xFF,
+                CapabilityTag.indoor_humidity >> 8,
+                CapabilityTag.screen_display & 0xFF,
+                CapabilityTag.screen_display >> 8,
+                CapabilityTag.fresh_air_1 & 0xFF,
+                CapabilityTag.fresh_air_1 >> 8,
+                CapabilityTag.fresh_air_2 & 0xFF,
+                CapabilityTag.fresh_air_2 >> 8,
+                CapabilityTag.wind_lr_angle & 0xFF,
+                CapabilityTag.wind_lr_angle >> 8,
+                CapabilityTag.wind_ud_angle & 0xFF,
+                CapabilityTag.wind_ud_angle >> 8,
+                CapabilityTag.rate_select & 0xFF,
+                CapabilityTag.rate_select >> 8,
             ],
         )
 
         assert msg.body[:-2] == expected_body
 
-    def test_new_protocol_self_clean_query_body(self) -> None:
-        """Test new protocol self-clean query body."""
-        msg = MessageNewProtocolSelfCleanQuery(protocol_version=ProtocolVersion.V1)
+    def test_new_protocol_query_body_includes_self_clean_when_supported(
+        self,
+    ) -> None:
+        """Test self_clean is appended when the capabilities map confirms it."""
+        msg = PropertiesQuery(
+            protocol_version=ProtocolVersion.V1,
+            capabilities={"self_clean": True},
+        )
         expected_body = bytearray(
             [
                 0xB1,
-                0x01,
-                NewProtocolTags.self_clean & 0xFF,
-                NewProtocolTags.self_clean >> 8,
+                0x09,  # params count (8 default + self_clean)
+                CapabilityTag.indirect_wind & 0xFF,
+                CapabilityTag.indirect_wind >> 8,
+                CapabilityTag.breezeless & 0xFF,
+                CapabilityTag.breezeless >> 8,
+                CapabilityTag.indoor_humidity & 0xFF,
+                CapabilityTag.indoor_humidity >> 8,
+                CapabilityTag.screen_display & 0xFF,
+                CapabilityTag.screen_display >> 8,
+                CapabilityTag.fresh_air_1 & 0xFF,
+                CapabilityTag.fresh_air_1 >> 8,
+                CapabilityTag.fresh_air_2 & 0xFF,
+                CapabilityTag.fresh_air_2 >> 8,
+                CapabilityTag.wind_lr_angle & 0xFF,
+                CapabilityTag.wind_lr_angle >> 8,
+                CapabilityTag.wind_ud_angle & 0xFF,
+                CapabilityTag.wind_ud_angle >> 8,
+                CapabilityTag.self_clean & 0xFF,
+                CapabilityTag.self_clean >> 8,
             ],
         )
+
         assert msg.body[:-2] == expected_body
 
+    def test_new_protocol_query_body_appends_optional_tags_in_order(self) -> None:
+        """Test both optional tags append in sorted (by tag value) order."""
+        msg = PropertiesQuery(
+            protocol_version=ProtocolVersion.V1,
+            capabilities={"rate_select": 2, "self_clean": True},
+        )
+        # Appended status tags come after the fixed base list, sorted by tag
+        # value regardless of dict insertion order: self_clean (0x39) first,
+        # then rate_select (0x48).
+        assert msg.body[:-2][-4:] == bytearray(
+            [
+                CapabilityTag.self_clean & 0xFF,
+                CapabilityTag.self_clean >> 8,
+                CapabilityTag.rate_select & 0xFF,
+                CapabilityTag.rate_select >> 8,
+            ],
+        )
 
-class TestMessageNewProtocolSetOutSilent:
+    def test_new_protocol_query_body_omits_optional_tags_when_falsy(self) -> None:
+        """Test falsy capability values keep the optional tags out of the body."""
+        msg = PropertiesQuery(
+            protocol_version=ProtocolVersion.V1,
+            capabilities={"self_clean": False, "rate_select": 0},
+        )
+        params_count = msg.body[1]
+        assert params_count == len(PropertiesQuery._default_properties)
+        assert CapabilityTag.self_clean not in msg.body
+        assert CapabilityTag.rate_select not in msg.body
+
+    def test_new_protocol_query_body_appends_all_known_tags(self) -> None:
+        """Test any truthy capability key naming a CapabilityTag member appends.
+
+        Capability keys are appended whenever they name a CapabilityTag
+        member and are truthy, sorted by tag value. Keys already in the default
+        list are not duplicated. Capability-only tags (poisoners) are blocked.
+        """
+        msg = PropertiesQuery(
+            protocol_version=ProtocolVersion.V1,
+            capabilities={
+                "temperature": 34,
+                "eco": True,  # capability-only, blocked
+                "humidity": 1,  # capability-only, blocked
+                "filter_remind": 1,  # capability-only, blocked
+                "sound": 1,  # not default anymore, appends
+                "self_clean": True,  # valid additional tag
+            },
+        )
+        params_count = msg.body[1]
+        # Only 3 tags appended: self_clean (0x0039), temperature (0x0225),
+        # sound (0x022C). eco/filter_remind/humidity are blocked.
+        assert params_count == len(PropertiesQuery._default_properties) + 3
+        # Appended tags come after the default list, sorted by value:
+        # self_clean 0x0039, temperature 0x0225, sound 0x022C.
+        assert msg.body[:-2][-6:] == bytearray(
+            [
+                CapabilityTag.self_clean & 0xFF,
+                CapabilityTag.self_clean >> 8,
+                CapabilityTag.temperature & 0xFF,
+                CapabilityTag.temperature >> 8,
+                CapabilityTag.sound & 0xFF,
+                CapabilityTag.sound >> 8,
+            ],
+        )
+
+    def test_new_protocol_query_body_ignores_unknown_capability_keys(self) -> None:
+        """Test capability keys that name no CapabilityTag member are skipped.
+
+        Manually-parsed capability keys (modes, swing_modes, fan_speeds, ...)
+        are not tag names and must not raise or be appended to the query.
+        """
+        msg = PropertiesQuery(
+            protocol_version=ProtocolVersion.V1,
+            capabilities={
+                "modes": ["heat", "cool"],
+                "swing_modes": ["horizontal"],
+                "fan_speeds": ["low"],
+            },
+        )
+        params_count = msg.body[1]
+        assert params_count == len(PropertiesQuery._default_properties)
+
+    def test_new_protocol_query_body_blocks_capability_only_poisoners(self) -> None:
+        """Test B5-only poisoner tags never appear in B1 query even when truthy.
+
+        These 13 tags suppress the entire B1 response when queried (issue-987
+        class). They must never be auto-appended, even when the capabilities
+        dict echoes them from B5 parsing.
+        """
+        # All 13 capability-only tags from the blocklist.
+        msg = PropertiesQuery(
+            protocol_version=ProtocolVersion.V1,
+            capabilities={
+                "wind_speed": 1,
+                "eco": 1,
+                "b5_8_heat": 1,
+                "mode": 1,
+                "wind_swing": 1,
+                "electricity": 1,
+                "filter_remind": 1,
+                "ptc": 1,
+                "strong_wind": 1,
+                "humidity": 1,
+                "filter_check": 1,
+                "fahrenheit": 1,
+                "screen_display_capability": 1,
+            },
+        )
+        params_count = msg.body[1]
+        # None of the 13 poisoners should be appended.
+        assert params_count == len(PropertiesQuery._default_properties)
+
+    def test_new_protocol_query_sound_appends_when_b5_advertises(self) -> None:
+        """Test sound appends when B5 capability parsing sets it to True."""
+        msg = PropertiesQuery(
+            protocol_version=ProtocolVersion.V1,
+            capabilities={"sound": True},
+        )
+        params_count = msg.body[1]
+        assert params_count == len(PropertiesQuery._default_properties) + 1
+        assert msg.body[:-2][-2:] == bytearray(
+            [
+                CapabilityTag.sound & 0xFF,
+                CapabilityTag.sound >> 8,
+            ],
+        )
+
+    def test_new_protocol_query_out_silent_via_customize_only(self) -> None:
+        """Test out_silent appends only when explicitly set via customize caps."""
+        msg = PropertiesQuery(
+            protocol_version=ProtocolVersion.V1,
+            capabilities={"out_silent": True},
+        )
+        params_count = msg.body[1]
+        assert params_count == len(PropertiesQuery._default_properties) + 1
+        assert msg.body[:-2][-2:] == bytearray(
+            [
+                CapabilityTag.out_silent & 0xFF,
+                CapabilityTag.out_silent >> 8,
+            ],
+        )
+
+    def test_new_protocol_query_error_code_via_customize_only(self) -> None:
+        """Test error_code appends only when explicitly set via customize caps."""
+        msg = PropertiesQuery(
+            protocol_version=ProtocolVersion.V1,
+            capabilities={"error_code": True},
+        )
+        params_count = msg.body[1]
+        assert params_count == len(PropertiesQuery._default_properties) + 1
+        assert msg.body[:-2][-2:] == bytearray(
+            [
+                CapabilityTag.error_code & 0xFF,
+                CapabilityTag.error_code >> 8,
+            ],
+        )
+
+    def test_new_protocol_query_dedup_default_tags(self) -> None:
+        """Test that a truthy capability key matching a default tag is skipped."""
+        # fresh_air_1 is in _default_properties; even if caps["fresh_air_1"]
+        # is truthy, it must not be appended a second time.
+        msg = PropertiesQuery(
+            protocol_version=ProtocolVersion.V1,
+            capabilities={"fresh_air_1": True},
+        )
+        params_count = msg.body[1]
+        # Count should equal defaults (no additional tag appended).
+        assert params_count == len(PropertiesQuery._default_properties)
+        # Verify fresh_air_1 appears exactly once in the body.
+        tag_bytes = bytearray(
+            [CapabilityTag.fresh_air_1 & 0xFF, CapabilityTag.fresh_air_1 >> 8],
+        )
+        body_hex = msg.body[:-2].hex()
+        assert body_hex.count(tag_bytes.hex()) == 1
+
+
+class TestCapabilityBodyParsing:
+    """Test B5 capability body parsing does not poison subsequent queries."""
+
+    def test_b5_capability_only_tags_do_not_leak_into_query(self) -> None:
+        """Test B5 tags auto-parsed as capability keys don't poison next query.
+
+        B5 responses carry capability-only tags (eco, filter_remind, ptc, ...)
+        that the generic auto-parse loop echoes into the capabilities dict.
+        Those keys must never be auto-appended to a B1 query.
+        """
+        # Minimal B5 body with eco (0x0212) and filter_remind (0x0217).
+        body = bytearray(
+            [
+                0xB5,
+                0x02,  # 2 params
+                CapabilityTag.eco & 0xFF,
+                CapabilityTag.eco >> 8,
+                0x01,  # length
+                0x01,  # eco supported
+                CapabilityTag.filter_remind & 0xFF,
+                CapabilityTag.filter_remind >> 8,
+                0x01,  # length
+                0x01,  # filter_remind supported
+            ],
+        )
+        # Parse the B5 body.
+        parsed = CapabilityBody(body)
+        caps = parsed.capabilities
+        # Confirm both tags were auto-parsed.
+        assert "eco" in caps
+        assert "filter_remind" in caps
+
+        # Now build a query with those capabilities.
+        msg = PropertiesQuery(protocol_version=ProtocolVersion.V1, capabilities=caps)
+        params_count = msg.body[1]
+        # Neither eco nor filter_remind should be in the query (blocked).
+        assert params_count == len(PropertiesQuery._default_properties)
+
+    def test_b5_sound_presence_yields_true_capability(self) -> None:
+        """Test B5 sound presence sets caps['sound'] = True."""
+        # Minimal B5 body with sound (0x022C).
+        body = bytearray(
+            [
+                0xB5,
+                0x01,  # 1 param
+                CapabilityTag.sound & 0xFF,
+                CapabilityTag.sound >> 8,
+                0x01,  # length
+                0x00,  # raw value 0 (but presence -> True)
+            ],
+        )
+        parsed = CapabilityBody(body)
+        caps = parsed.capabilities
+        # Presence sets sound to True regardless of raw[0].
+        assert caps.get("sound") is True
+
+        # Query with this capability should include sound.
+        msg = PropertiesQuery(protocol_version=ProtocolVersion.V1, capabilities=caps)
+        params_count = msg.body[1]
+        assert params_count == len(PropertiesQuery._default_properties) + 1
+
+
+class TestNewProtocolSetOutSilent:
     """Test Message New Protocol Set for out_silent."""
 
     @pytest.mark.parametrize(
@@ -362,26 +612,26 @@ class TestMessageNewProtocolSetOutSilent:
     )
     def test_out_silent_on_off(self, value: bool, expected_byte: int) -> None:
         """Test out_silent set to on/off sends correct byte."""
-        msg = MessageNewProtocolSet(protocol_version=ProtocolVersion.V1)
+        msg = PropertiesSet(protocol_version=ProtocolVersion.V1)
         msg.out_silent = value
         body = msg.body
         assert body[0] == 0xB0
         assert body[1] == 0x01  # 1 param packed
-        assert body[2] == NewProtocolTags.out_silent & 0xFF  # 0xCD
-        assert body[3] == NewProtocolTags.out_silent >> 8  # 0x00
+        assert body[2] == CapabilityTag.out_silent & 0xFF  # 0xCD
+        assert body[3] == CapabilityTag.out_silent >> 8  # 0x00
         assert body[4] == 0x01  # length byte
         assert body[5] == expected_byte
 
     def test_out_silent_none_not_packed(self) -> None:
         """Test out_silent None does not add to payload."""
-        msg = MessageNewProtocolSet(protocol_version=ProtocolVersion.V1)
+        msg = PropertiesSet(protocol_version=ProtocolVersion.V1)
         # out_silent defaults to None, should not be packed
         body = msg.body
         assert body[0] == 0xB0
         assert body[1] == 0x00  # 0 params packed
 
 
-class TestMessageNewProtocolSetAngles:
+class TestNewProtocolSetAngles:
     """Test Message New Protocol Set for wind angles and rate select."""
 
     @pytest.mark.parametrize(
@@ -390,14 +640,14 @@ class TestMessageNewProtocolSetAngles:
     )
     def test_wind_lr_angle(self, value: int, expected_byte: int) -> None:
         """Test wind_lr_angle set sends correct byte."""
-        msg = MessageNewProtocolSet(protocol_version=ProtocolVersion.V1)
+        msg = PropertiesSet(protocol_version=ProtocolVersion.V1)
         # source annotates wind_lr_angle as bytes | None but the device sets ints
         setattr(msg, "wind_lr_angle", value)  # noqa: B010
         body = msg.body
         assert body[0] == 0xB0
         assert body[1] == 0x01  # 1 param packed
-        assert body[2] == NewProtocolTags.wind_lr_angle & 0xFF  # 0x0A
-        assert body[3] == NewProtocolTags.wind_lr_angle >> 8  # 0x00
+        assert body[2] == CapabilityTag.wind_lr_angle & 0xFF  # 0x0A
+        assert body[3] == CapabilityTag.wind_lr_angle >> 8  # 0x00
         assert body[4] == 0x01  # length byte
         assert body[5] == expected_byte
 
@@ -407,26 +657,26 @@ class TestMessageNewProtocolSetAngles:
     )
     def test_wind_ud_angle(self, value: int, expected_byte: int) -> None:
         """Test wind_ud_angle set sends correct byte."""
-        msg = MessageNewProtocolSet(protocol_version=ProtocolVersion.V1)
+        msg = PropertiesSet(protocol_version=ProtocolVersion.V1)
         # source annotates wind_ud_angle as bytes | None but the device sets ints
         setattr(msg, "wind_ud_angle", value)  # noqa: B010
         body = msg.body
         assert body[0] == 0xB0
         assert body[1] == 0x01  # 1 param packed
-        assert body[2] == NewProtocolTags.wind_ud_angle & 0xFF  # 0x09
-        assert body[3] == NewProtocolTags.wind_ud_angle >> 8  # 0x00
+        assert body[2] == CapabilityTag.wind_ud_angle & 0xFF  # 0x09
+        assert body[3] == CapabilityTag.wind_ud_angle >> 8  # 0x00
         assert body[4] == 0x01  # length byte
         assert body[5] == expected_byte
 
     def test_rate_select(self) -> None:
         """Test rate_select set sends correct byte."""
-        msg = MessageNewProtocolSet(protocol_version=ProtocolVersion.V1)
+        msg = PropertiesSet(protocol_version=ProtocolVersion.V1)
         msg.rate_select = 60
         body = msg.body
         assert body[0] == 0xB0
         assert body[1] == 0x01  # 1 param packed
-        assert body[2] == NewProtocolTags.rate_select & 0xFF  # 0x48
-        assert body[3] == NewProtocolTags.rate_select >> 8  # 0x00
+        assert body[2] == CapabilityTag.rate_select & 0xFF  # 0x48
+        assert body[3] == CapabilityTag.rate_select >> 8  # 0x00
         assert body[4] == 0x01  # length byte
         assert body[5] == 60
 
@@ -456,26 +706,26 @@ class TestMessageSubProtocol:
     def test_distinct_query_classes(self) -> None:
         """Test BB queries have independent protocol identities."""
         queries = [
-            MessageSubProtocolQuery10(ProtocolVersion.V1),
-            MessageSubProtocolQuery11(ProtocolVersion.V1),
-            MessageSubProtocolQuery30(ProtocolVersion.V1),
+            SubProtocolQuery10(ProtocolVersion.V1),
+            SubProtocolQuery11(ProtocolVersion.V1),
+            SubProtocolQuery30(ProtocolVersion.V1),
         ]
 
         assert [query.body[5] for query in queries] == [0x10, 0x11, 0x30]
         assert len({query.__class__.__name__ for query in queries}) == 3
 
 
-class TestMessageGroupOneQuery:
+class TestGroupOneQuery:
     """Test AC C1 group 0x41 query."""
 
     def test_query_body(self) -> None:
         """Test exact group 0x41 query body."""
-        message = MessageGroupOneQuery(ProtocolVersion.V1)
+        message = GroupOneQuery(ProtocolVersion.V1)
 
         assert message.body.hex() == "4121014100013c"
 
 
-class TestMessageSubProtocolFreshAirSet:
+class TestSubProtocolFreshAirSet:
     """Test BB fresh-air single-control commands."""
 
     @pytest.mark.parametrize(
@@ -535,7 +785,7 @@ class TestMessageSubProtocolFreshAirSet:
         expected: str,
     ) -> None:
         """Test exact intake and exhaust command bytes."""
-        message = MessageSubProtocolFreshAirSet(
+        message = SubProtocolFreshAirSet(
             ProtocolVersion.V1,
             power,
             speed,
@@ -625,12 +875,12 @@ class TestMessageSubProtocolSet:
         assert msg.body[:-2] == expected_body
 
 
-class TestMessageGeneralSet:
+class TestMessageSet:
     """Test Message General Set."""
 
     def test_general_set_body(self) -> None:
         """Test general set body."""
-        msg = MessageGeneralSet(protocol_version=ProtocolVersion.V1)
+        msg = StateSet(protocol_version=ProtocolVersion.V1)
         expected_body = bytearray(
             [
                 0x40,
@@ -798,6 +1048,46 @@ class TestMessageACResponse:
         assert hasattr(response, "outdoor_temperature")
         assert response.outdoor_temperature == -6.5  # ((40 - 50) / 2) - 1.5 = -6.5
 
+    def test_message_notify1_a1_short_body(self) -> None:
+        """Test Message parse notify1 A1 with a body too short to parse."""
+        self.header[9] = 0x04
+        # Real frame from a 00000Q1B / subtype 44204 unit: 7-byte body
+        # (last byte is the checksum and is stripped by MessageResponse).
+        # XA1MessageBody reads up to body[17], so it must be skipped, not parsed.
+        body = bytearray([0xA1, 0x00, 0x03, 0x8A, 0x95, 0xB6, 0xC1, 0x02])
+        response = MessageACResponse(self.header + body)
+
+        assert not hasattr(response, "indoor_temperature")
+        assert not hasattr(response, "outdoor_temperature")
+        assert not hasattr(response, "indoor_humidity")
+        assert not hasattr(response, "current_work_time")
+
+    def test_message_notify1_a1_body_length_boundary(self) -> None:
+        """Test Message parse notify1 A1 boundary at A1_MIN_BODY_LENGTH."""
+        self.header[9] = 0x04
+
+        # One byte short of the minimum: skipped, and must not raise.
+        # +1 accounts for the trailing checksum byte stripped by MessageResponse.
+        body = bytearray(A1_MIN_BODY_LENGTH - 1 + 1)
+        body[0] = 0xA1
+        response = MessageACResponse(self.header + body)
+        assert not hasattr(response, "indoor_temperature")
+
+        # Exactly the minimum: parsed.
+        body = bytearray(A1_MIN_BODY_LENGTH + 1)
+        body[0] = 0xA1
+        body[13] = 100  # Indoor temperature byte
+        body[14] = 60  # Outdoor temperature byte
+        body[17] = 50  # Indoor humidity byte
+        response = MessageACResponse(self.header + body)
+
+        assert hasattr(response, "indoor_temperature")
+        assert response.indoor_temperature == 25.0  # (100 - 50) / 2
+        assert hasattr(response, "outdoor_temperature")
+        assert response.outdoor_temperature == 5.0  # (60 - 50) / 2
+        assert hasattr(response, "indoor_humidity")
+        assert response.indoor_humidity == 50
+
     def test_message_query_b5(self) -> None:
         """Test message query b5."""
         body = bytearray(
@@ -842,24 +1132,24 @@ class TestMessageACResponse:
         body = bytearray(29)
         body[0] = 0xB0  # Body type
         body[1] = 0x05  # Params count
-        body[2] = NewProtocolTags.indirect_wind & 0xFF  # Low byte param
-        body[3] = NewProtocolTags.indirect_wind >> 8  # High byte param
+        body[2] = CapabilityTag.indirect_wind & 0xFF  # Low byte param
+        body[3] = CapabilityTag.indirect_wind >> 8  # High byte param
         body[5] = 0x01  # Value length
         body[6] = 0x02  # Value True
-        body[7] = NewProtocolTags.indoor_humidity & 0xFF  # Low byte param
-        body[8] = NewProtocolTags.indoor_humidity >> 8  # High byte param
+        body[7] = CapabilityTag.indoor_humidity & 0xFF  # Low byte param
+        body[8] = CapabilityTag.indoor_humidity >> 8  # High byte param
         body[10] = 0x01  # Value length
         body[11] = 30  # Value 30
-        body[12] = NewProtocolTags.breezeless & 0xFF  # Low byte param
-        body[13] = NewProtocolTags.breezeless >> 8  # High byte param
+        body[12] = CapabilityTag.breezeless & 0xFF  # Low byte param
+        body[13] = CapabilityTag.breezeless >> 8  # High byte param
         body[15] = 0x01  # Value length
         body[16] = 0x01  # Value True
-        body[17] = NewProtocolTags.screen_display & 0xFF  # Low byte param
-        body[18] = NewProtocolTags.screen_display >> 8  # High byte param
+        body[17] = CapabilityTag.screen_display & 0xFF  # Low byte param
+        body[18] = CapabilityTag.screen_display >> 8  # High byte param
         body[20] = 0x01  # Value length
         body[21] = 0x01  # Value True
-        body[22] = NewProtocolTags.fresh_air_1 & 0xFF  # Low byte param
-        body[23] = NewProtocolTags.fresh_air_1 >> 8  # High byte param
+        body[22] = CapabilityTag.fresh_air_1 & 0xFF  # Low byte param
+        body[23] = CapabilityTag.fresh_air_1 >> 8  # High byte param
         body[25] = 0x02  # Value length
         body[26] = 0x02  # Value Power True
         body[27] = 10  # Value Speed 10
@@ -877,8 +1167,8 @@ class TestMessageACResponse:
         assert hasattr(response, "fresh_air_fan_speed")
         assert response.fresh_air_fan_speed == 10
 
-        body[22] = NewProtocolTags.fresh_air_2 & 0xFF  # Low byte param
-        body[23] = NewProtocolTags.fresh_air_2 >> 8  # High byte param
+        body[22] = CapabilityTag.fresh_air_2 & 0xFF  # Low byte param
+        body[23] = CapabilityTag.fresh_air_2 >> 8  # High byte param
         body[25] = 0x02  # Value length
         body[26] = 0x01  # Value Power True
         body[27] = 20  # Value Speed 20
@@ -895,8 +1185,8 @@ class TestMessageACResponse:
         body = bytearray(10)
         body[0] = 0xB0  # Body type
         body[1] = 0x01  # Params count
-        body[2] = NewProtocolTags.rate_select & 0xFF  # Low byte 0x48
-        body[3] = NewProtocolTags.rate_select >> 8  # High byte 0x00
+        body[2] = CapabilityTag.rate_select & 0xFF  # Low byte 0x48
+        body[3] = CapabilityTag.rate_select >> 8  # High byte 0x00
         body[4] = 0x00  # Padding
         body[5] = 0x01  # Value length
         body[6] = 40  # Value 40
@@ -909,92 +1199,150 @@ class TestMessageACResponse:
         """Test Message parse query B5 capabilities."""
         self.header[9] = 0x03
         body = bytearray([0xB5, 0x0B])  # Body type, params count
-        body += bytearray([0x14, 0x02, 0x01, 7])  # b5_mode
-        body += bytearray([0x15, 0x02, 0x01, 1])  # b5_wind_swing
-        body += bytearray([0x10, 0x02, 0x01, 5])  # b5_wind_speed
-        body += bytearray([0x12, 0x02, 0x01, 1])  # b5_eco
-        body += bytearray([0x1E, 0x02, 0x01, 1])  # b5_anion
-        body += bytearray([0x17, 0x02, 0x01, 1])  # b5_filter_remind
-        body += bytearray([0x1A, 0x02, 0x01, 1])  # b5_strong_wind
-        body += bytearray([0x25, 0x02, 0x07, 34, 60, 34, 60, 34, 60, 0])  # temperature
-        body += bytearray([0x24, 0x02, 0x01, 1])  # b5_screen_display
-        body += bytearray([0x2C, 0x02, 0x01, 1])  # b5_sound
-        body += bytearray([0x1F, 0x02, 0x01, 1])  # b5_humidity
+        body += bytearray([0x14, 0x02, 0x01, 7])  # mode
+        body += bytearray([0x15, 0x02, 0x01, 1])  # wind_swing
+        body += bytearray([0x10, 0x02, 0x01, 5])  # wind_speed
+        body += bytearray([0x12, 0x02, 0x01, 1])  # eco
+        body += bytearray([0x1E, 0x02, 0x01, 1])  # anion
+        body += bytearray([0x17, 0x02, 0x01, 1])  # filter_remind
+        body += bytearray([0x1A, 0x02, 0x01, 1])  # strong_wind
+        body += bytearray([0x25, 0x02, 0x07, 34, 60, 34, 60, 34, 60, 1])  # temperature
+        # screen_display_capability
+        body += bytearray([0x24, 0x02, 0x01, 1])
+        body += bytearray([0x2C, 0x02, 0x01, 1])  # sound
+        body += bytearray([0x1F, 0x02, 0x01, 1])  # humidity
         body += bytearray(1)  # trailing checksum byte (stripped by MessageResponse)
 
         response = MessageACResponse(self.header + body)
-        assert hasattr(response, "b5_mode")
-        assert response.b5_mode == 7
-        assert hasattr(response, "b5_anion")
-        assert response.b5_anion == 1
-        assert hasattr(response, "b5_filter_remind")
-        assert response.b5_filter_remind == 1
-        assert hasattr(response, "b5_strong_wind")
-        assert response.b5_strong_wind == 1
-        assert hasattr(response, "b5_wind_speed")
-        assert response.b5_wind_speed == 5
-        assert hasattr(response, "b5_screen_display")
-        assert response.b5_screen_display == 1
-        assert hasattr(response, "b5_sound")
-        assert response.b5_sound == 1
-        assert hasattr(response, "b5_humidity")
-        assert response.b5_humidity == 1
-        assert hasattr(response, "b5_temperature0")
-        assert response.b5_temperature0 == 34
-        assert hasattr(response, "b5_temperature6")
-        assert response.b5_temperature6 == 0
-        assert hasattr(response, "temperature_limits")
-        assert response.temperature_limits == {
-            1: (17.0, 30.0),
-            2: (17.0, 30.0),
-            3: (17.0, 30.0),
-            4: (17.0, 30.0),
-            5: (17.0, 30.0),
-        }
+        # All capability tags are parsed into capabilities dict, including the
+        # temperature capability as a nested per-mode setpoint-limit map.
         assert hasattr(response, "capabilities")
         assert response.capabilities == {
-            "heat_mode": True,
-            "cool_mode": True,
-            "dry_mode": False,
-            "auto_mode": True,
-            "swing_horizontal": True,
-            "swing_vertical": True,
-            "fan_silent": False,
-            "fan_low": True,
-            "fan_medium": True,
-            "fan_high": True,
-            "fan_auto": True,
-            "fan_custom": False,
+            # Manually parsed capabilities with special logic
+            "modes": ["heat", "cool", "auto"],
+            "swing_modes": ["horizontal", "vertical"],
+            "fan_speeds": ["low", "medium", "high", "auto"],
             "eco": True,
             "anion": True,
             "turbo_cool": True,
             "turbo_heat": True,
             "display_control": True,
+            # Presence-based capability (raw value ignored)
+            "sound": True,
+            # Per-mode setpoint limits (0.5 C units): 34/2=17.0, 60/2=30.0.
+            # Decimals flag (index 6 for size=7) indicates 0.5 C support.
+            "temperature": {
+                "cool": {"min": 17.0, "max": 30.0},
+                "auto": {"min": 17.0, "max": 30.0},
+                "heat": {"min": 17.0, "max": 30.0},
+                "decimals": True,
+            },
+            # Auto-parsed tags (raw value from first byte)
+            "filter_remind": 1,
+            "humidity": 1,
         }
 
-    @pytest.mark.parametrize(
-        ("raw_value", "expected"),
-        [(4, True), (1, True), (0, False)],
-    )
-    def test_message_query_b5_electricity_gates_rate_select(
+    def test_message_query_b5_temperature_decimals_short_size(self) -> None:
+        """Test temperature decimals parsing with short size (<=6 bytes)."""
+        self.header[9] = 0x03
+        body = bytearray([0xB5, 0x01])  # Body type, params count
+        # Temperature with 6 bytes: cool/auto/heat min/max only, no trailing byte
+        # Decimals flag is at index 2 (auto min) when size <= 6
+        body += bytearray([0x25, 0x02, 0x06, 34, 60, 1, 60, 34, 60])  # temperature
+        body += bytearray(1)  # trailing checksum byte
+
+        response = MessageACResponse(self.header + body)
+        assert hasattr(response, "capabilities")
+        assert "temperature" in response.capabilities
+        temp = response.capabilities["temperature"]
+        assert isinstance(temp, dict)
+        # Index 2 (third byte = 1) is the decimals flag when size = 6
+        assert temp["decimals"] is True
+        assert temp["cool"]["min"] == 17.0
+        assert temp["cool"]["max"] == 30.0
+
+    def test_message_query_b5_temperature_too_short(self) -> None:
+        """Test temperature capability is skipped when data is too short."""
+        self.header[9] = 0x03
+        body = bytearray([0xB5, 0x01])  # Body type, params count
+        # Temperature with only 5 bytes: missing heat max index (needs 6 minimum)
+        body += bytearray([0x25, 0x02, 0x05, 34, 60, 1, 60, 34])
+        body += bytearray(1)  # trailing checksum byte
+
+        response = MessageACResponse(self.header + body)
+        assert hasattr(response, "capabilities")
+        # Temperature capability should be skipped due to insufficient data
+        assert "temperature" not in response.capabilities
+
+    def test_message_query_b5_detects_additional_capabilities(self) -> None:
+        """Test the basic B5 frame's trailing flag arms the additional query.
+
+        These are full frames captured from a PortaSplit AC. The basic frame
+        ends in a non-zero flag (device has a second frame); the additional
+        frame ends in a zero flag (no more frames).
+        """
+        basic = bytearray.fromhex(
+            "aa3dac00000000000803b50a1202010114020101150201001e020101170201021a"
+            "02010110020101250207203c203c203c00240201014800010101199831",
+        )
+        additional = bytearray.fromhex(
+            "aa2fac00000000000803b5081f0201002c020101160201043900010151000101e3"
+            "00010113020101cd000103001a6910",
+        )
+
+        basic_response = MessageACResponse(basic)
+        assert hasattr(basic_response, "additional_capabilities")
+        assert basic_response.additional_capabilities is True
+
+        additional_response = MessageACResponse(additional)
+        assert hasattr(additional_response, "additional_capabilities")
+        assert additional_response.additional_capabilities is False
+
+    @pytest.mark.parametrize("raw_value", [4, 3, 2, 1, 0])
+    def test_message_query_b5_electricity_reports_rate_level_count(
         self,
         raw_value: int,
-        expected: bool,
     ) -> None:
-        """Test b5_electricity capability gates the rate_select capability flag.
+        """Test electricity capability exposes the raw rate level count.
 
-        A nonzero value (rate level count) means the device supports
-        rate_select; 0 means unsupported.
+        The electricity byte is a rate level count, not a boolean:
+        1 selects the 2-gear map, 2/3 select the 5-gear map, 0 means
+        unsupported. The parser stores the raw value so the device layer can
+        pick the right gear map.
         """
         self.header[9] = 0x03
         body = bytearray([0xB5, 0x01])  # Body type, params count
-        body += bytearray([0x16, 0x02, 0x01, raw_value])  # b5_electricity
+        body += bytearray([0x16, 0x02, 0x01, raw_value])  # electricity
         body += bytearray(1)  # trailing checksum byte (stripped by MessageResponse)
 
         response = MessageACResponse(self.header + body)
 
         assert hasattr(response, "capabilities")
-        assert response.capabilities == {"rate_select": expected}
+        assert response.capabilities == {"rate_select": raw_value}
+
+    @pytest.mark.parametrize(
+        ("raw_value", "expected"),
+        [(1, True), (0, False)],
+    )
+    def test_message_query_b5_self_clean_reports_support(
+        self,
+        raw_value: int,
+        expected: bool,
+    ) -> None:
+        """Test the B5 self_clean tag advertises self-clean support.
+
+        In a B5 body tag 0x0039 advertises support (live state is only in
+        B0/B1 bodies), so a non-zero byte marks the feature supported.
+        """
+        self.header[9] = 0x03
+        body = bytearray([0xB5, 0x01])  # Body type, params count
+        body += bytearray([0x39, 0x00, 0x01, raw_value])  # self_clean (0x0039)
+        body += bytearray(1)  # trailing checksum byte (stripped by MessageResponse)
+
+        response = MessageACResponse(self.header + body)
+
+        assert hasattr(response, "capabilities")
+        assert response.capabilities == {"self_clean": expected}
 
     def test_message_query_b5_custom_fan_supports_named_speeds(self) -> None:
         """Test B5 fan custom profile includes named fan speeds."""
@@ -1007,12 +1355,7 @@ class TestMessageACResponse:
 
         assert hasattr(response, "capabilities")
         assert response.capabilities == {
-            "fan_silent": True,
-            "fan_low": True,
-            "fan_medium": True,
-            "fan_high": True,
-            "fan_auto": True,
-            "fan_custom": True,
+            "fan_speeds": ["silent", "low", "medium", "high", "auto", "custom"],
         }
 
     def test_message_query_b5_value_9_fan_supports_silent_low_high_auto(
@@ -1028,13 +1371,95 @@ class TestMessageACResponse:
 
         assert hasattr(response, "capabilities")
         assert response.capabilities == {
-            "fan_silent": True,
-            "fan_low": True,
-            "fan_medium": False,
-            "fan_high": True,
-            "fan_auto": True,
-            "fan_custom": False,
+            "fan_speeds": ["silent", "low", "high", "auto"],
         }
+
+    def test_message_query_b5_warns_unknown_tag(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Test B5 capability parsing warns about unknown tags."""
+        self.header[9] = 0x03
+        body = bytearray([0xB5, 0x02])  # Body type, 2 params
+        # Add a known tag (b5_mode)
+        body += bytearray([0x14, 0x02, 0x01, 7])  # b5_mode
+        # Add an unknown B5-range tag (0x0299, not in CapabilityTag)
+        body += bytearray([0x99, 0x02, 0x01, 0x42])
+        body += bytearray(1)  # trailing checksum byte
+
+        with caplog.at_level(logging.WARNING):
+            response = MessageACResponse(self.header + body)
+
+        # Known tag should parse
+        assert hasattr(response, "capabilities")
+        assert "modes" in response.capabilities
+        # Unknown tag should trigger warning
+        assert any(
+            "Unknown capability tag" in record.message and "0x0299" in record.message
+            for record in caplog.records
+        )
+
+    def test_message_query_b5_mode_excludes_unsupported_modes(self) -> None:
+        """Test B5 mode capability excludes modes based on value."""
+        self.header[9] = 0x03
+        body = bytearray([0xB5, 0x01])  # Body type, 1 param
+        # Value 3: no heat (not in B5_HEAT_MODE_VALUES),
+        # has cool (not in B5_NO_COOL_MODE_VALUES),
+        # no dry (not in B5_DRY_MODE_VALUES),
+        # no auto (not in B5_AUTO_MODE_VALUES)
+        body += bytearray([0x14, 0x02, 0x01, 3])  # mode tag with value 3
+        body += bytearray(1)  # trailing checksum byte
+
+        response = MessageACResponse(self.header + body)
+
+        assert hasattr(response, "capabilities")
+        assert response.capabilities["modes"] == ["cool"]
+
+    def test_message_query_b5_mode_excludes_cool_when_in_no_cool_values(
+        self,
+    ) -> None:
+        """Test B5 mode capability excludes cool for no-cool values."""
+        self.header[9] = 0x03
+        body = bytearray([0xB5, 0x01])  # Body type, 1 param
+        # Value 10: has heat (in B5_HEAT_MODE_VALUES),
+        # no cool (in B5_NO_COOL_MODE_VALUES),
+        # no dry (not in B5_DRY_MODE_VALUES),
+        # no auto (not in B5_AUTO_MODE_VALUES)
+        body += bytearray([0x14, 0x02, 0x01, 10])  # mode tag with value 10
+        body += bytearray(1)  # trailing checksum byte
+
+        response = MessageACResponse(self.header + body)
+
+        assert hasattr(response, "capabilities")
+        assert response.capabilities["modes"] == ["heat"]
+
+    def test_message_query_b5_swing_excludes_unsupported_directions(self) -> None:
+        """Test B5 swing capability excludes directions based on value."""
+        self.header[9] = 0x03
+        body = bytearray([0xB5, 0x01])  # Body type, 1 param
+        # Value 2: no horizontal (not in B5_SWING_HORIZONTAL_VALUES),
+        # no vertical (value >= B5_LOW_VALUE_MAX which is 2)
+        body += bytearray([0x15, 0x02, 0x01, 2])  # wind_swing tag with value 2
+        body += bytearray(1)  # trailing checksum byte
+
+        response = MessageACResponse(self.header + body)
+
+        assert hasattr(response, "capabilities")
+        assert response.capabilities["swing_modes"] == []
+
+    def test_message_query_b5_fan_speed_excludes_unsupported_speeds(self) -> None:
+        """Test B5 fan speed capability excludes speeds based on value."""
+        self.header[9] = 0x03
+        body = bytearray([0xB5, 0x01])  # Body type, 1 param
+        # Value 8: not custom, no silent, no low/high, no medium, no auto
+        # (8 is not in any of the B5_FAN_* sets)
+        body += bytearray([0x10, 0x02, 0x01, 8])  # wind_speed tag with value 8
+        body += bytearray(1)  # trailing checksum byte
+
+        response = MessageACResponse(self.header + body)
+
+        assert hasattr(response, "capabilities")
+        assert response.capabilities["fan_speeds"] == []
 
     @pytest.mark.parametrize(
         ("raw_value", "expected"),
@@ -1049,8 +1474,8 @@ class TestMessageACResponse:
         body = bytearray(10)
         body[0] = 0xB0  # Body type
         body[1] = 0x01  # Params count
-        body[2] = NewProtocolTags.out_silent & 0xFF  # Low byte 0xCD
-        body[3] = NewProtocolTags.out_silent >> 8  # High byte 0x00
+        body[2] = CapabilityTag.out_silent & 0xFF  # Low byte 0xCD
+        body[3] = CapabilityTag.out_silent >> 8  # High byte 0x00
         body[4] = 0x00  # Padding
         body[5] = 0x01  # Value length
         body[6] = raw_value
@@ -1075,8 +1500,8 @@ class TestMessageACResponse:
             [
                 0xB1,  # Body type
                 0x01,  # Params count
-                NewProtocolTags.self_clean & 0xFF,
-                NewProtocolTags.self_clean >> 8,
+                CapabilityTag.self_clean & 0xFF,
+                CapabilityTag.self_clean >> 8,
                 0x00,
                 0x01,  # Value length
                 raw_value,
@@ -1096,8 +1521,8 @@ class TestMessageACResponse:
             [
                 0xB5,  # Body type
                 0x01,  # Params count
-                NewProtocolTags.self_clean & 0xFF,
-                NewProtocolTags.self_clean >> 8,
+                CapabilityTag.self_clean & 0xFF,
+                CapabilityTag.self_clean >> 8,
                 0x01,  # Value length
                 0x01,  # Capability: supported
                 0x00,  # trailing checksum byte (stripped by MessageResponse)
@@ -1106,6 +1531,93 @@ class TestMessageACResponse:
 
         response = MessageACResponse(self.header + body)
         assert not hasattr(response, "self_clean_active")
+
+    @pytest.mark.parametrize(
+        ("start", "end", "expected"),
+        [
+            (1, 0, True),  # supported via start byte
+            (0, 2, True),  # supported via end byte
+            (8, 8, True),  # ECOMaster
+            (0, 0, False),  # unsupported
+        ],
+    )
+    def test_message_query_b5_ieco_reports_support(
+        self,
+        start: int,
+        end: int,
+        expected: bool,
+    ) -> None:
+        """Test the B5 iECO tag advertises support from start/end bytes."""
+        self.header[9] = 0x03
+        body = bytearray([0xB5, 0x01])  # Body type, params count
+        # iECO (0x00E3): start byte then end byte
+        body += bytearray([0xE3, 0x00, 0x02, start, end])
+        body += bytearray(1)  # trailing checksum byte (stripped by MessageResponse)
+
+        response = MessageACResponse(self.header + body)
+        assert hasattr(response, "capabilities")
+        assert response.capabilities == {"ieco": expected}
+
+    def test_message_query_b5_ieco_single_byte(self) -> None:
+        """Test the B5 iECO tag with only a start byte still parses."""
+        self.header[9] = 0x03
+        body = bytearray([0xB5, 0x01])  # Body type, params count
+        body += bytearray([0xE3, 0x00, 0x01, 0x03])  # start byte only
+        body += bytearray(1)  # trailing checksum byte
+
+        response = MessageACResponse(self.header + body)
+        assert hasattr(response, "capabilities")
+        assert response.capabilities == {"ieco": True}
+
+    @pytest.mark.parametrize(
+        ("switch", "number", "expected_state"),
+        [(0x01, 0x03, True), (0x00, 0x02, False)],
+    )
+    def test_message_query_b1_ieco_state(
+        self,
+        switch: int,
+        number: int,
+        expected_state: bool,
+    ) -> None:
+        """Test Message parse query B1 reports live iECO state and number."""
+        self.header[9] = 0x03
+        body = bytearray(
+            [
+                0xB1,  # Body type
+                0x01,  # Params count
+                CapabilityTag.ieco & 0xFF,
+                CapabilityTag.ieco >> 8,
+                0x00,
+                0x02,  # Value length
+                number,  # data[0] - iECO number
+                switch,  # data[1] - on/off switch
+                0x00,  # trailing checksum byte (stripped by MessageResponse)
+            ],
+        )
+
+        response = MessageACResponse(self.header + body)
+        assert hasattr(response, "ieco")
+        assert hasattr(response, "ieco_number")
+        assert response.ieco is expected_state
+        assert response.ieco_number == number
+
+    def test_message_notify2_b5_ieco_is_capability_only(self) -> None:
+        """Test that tag 0x00E3 in a B5 body is not read as live state."""
+        body = bytearray(
+            [
+                0xB5,  # Body type
+                0x01,  # Params count
+                CapabilityTag.ieco & 0xFF,
+                CapabilityTag.ieco >> 8,
+                0x02,  # Value length
+                0x01,  # start byte: supported
+                0x01,  # end byte
+                0x00,  # trailing checksum byte (stripped by MessageResponse)
+            ],
+        )
+
+        response = MessageACResponse(self.header + body)
+        assert not hasattr(response, "ieco")
 
     def test_message_query_c0(self) -> None:
         """Test Message parse query C0."""
@@ -1744,8 +2256,8 @@ class TestMessageACResponse:
         body = bytearray(10)
         body[0] = 0xB1
         body[1] = 0x01  # 1 param
-        body[2] = NewProtocolQuery.error_code_query & 0xFF
-        body[3] = NewProtocolQuery.error_code_query >> 8
+        body[2] = CapabilityTag.error_code & 0xFF
+        body[3] = CapabilityTag.error_code >> 8
         body[4] = 0x00  # padding
         body[5] = 0x01  # length
         body[6] = 0x05  # error code 5
@@ -1754,13 +2266,13 @@ class TestMessageACResponse:
         assert response.error_code == 5
 
     def test_message_b1_sound(self) -> None:
-        """Test sound parsed from B1 response (buzzer_all tag)."""
+        """Test sound parsed from B1 response (sound tag)."""
         self.header[9] = 0x03
         body = bytearray(10)
         body[0] = 0xB1
         body[1] = 0x01
-        body[2] = NewProtocolTags.buzzer_all & 0xFF
-        body[3] = NewProtocolTags.buzzer_all >> 8
+        body[2] = CapabilityTag.sound & 0xFF
+        body[3] = CapabilityTag.sound >> 8
         body[4] = 0x00
         body[5] = 0x01
         body[6] = 0x01  # sound on
@@ -2071,8 +2583,8 @@ class TestMessageACResponse:
         assert not hasattr(response, "outdoor_temperature")
 
 
-class TestMessageNewProtocolSetNewFeatures:
-    """Test MessageNewProtocolSet for sound and self_clean."""
+class TestNewProtocolSetNewFeatures:
+    """Test PropertiesSet for sound and self_clean."""
 
     @pytest.mark.parametrize(
         ("value", "expected_byte"),
@@ -2080,13 +2592,13 @@ class TestMessageNewProtocolSetNewFeatures:
     )
     def test_sound_on_off(self, value: bool, expected_byte: int) -> None:
         """Test sound set to on/off sends correct byte."""
-        msg = MessageNewProtocolSet(protocol_version=ProtocolVersion.V1)
+        msg = PropertiesSet(protocol_version=ProtocolVersion.V1)
         msg.sound = value
         body = msg.body
         assert body[0] == 0xB0
         assert body[1] == 0x01
-        assert body[2] == NewProtocolTags.buzzer_all & 0xFF
-        assert body[3] == NewProtocolTags.buzzer_all >> 8
+        assert body[2] == CapabilityTag.sound & 0xFF
+        assert body[3] == CapabilityTag.sound >> 8
         assert body[4] == 0x01
         assert body[5] == expected_byte
 
@@ -2096,19 +2608,57 @@ class TestMessageNewProtocolSetNewFeatures:
     )
     def test_self_clean_on_off(self, value: bool, expected_byte: int) -> None:
         """Test self_clean set to on/off sends correct byte."""
-        msg = MessageNewProtocolSet(protocol_version=ProtocolVersion.V1)
+        msg = PropertiesSet(protocol_version=ProtocolVersion.V1)
         msg.self_clean = value
         body = msg.body
         assert body[0] == 0xB0
         assert body[1] == 0x01
-        assert body[2] == NewProtocolTags.self_clean & 0xFF
-        assert body[3] == NewProtocolTags.self_clean >> 8
+        assert body[2] == CapabilityTag.self_clean & 0xFF
+        assert body[3] == CapabilityTag.self_clean >> 8
         assert body[4] == 0x01
         assert body[5] == expected_byte
 
 
-class TestMessageGeneralSetAnion:
-    """Test MessageGeneralSet anion (purifier) bit."""
+class TestNewProtocolSetIeco:
+    """Test PropertiesSet for iECO."""
+
+    @pytest.mark.parametrize(
+        ("value", "expected_switch"),
+        [(True, 0x01), (False, 0x00)],
+    )
+    def test_ieco_on_off(self, value: bool, expected_switch: int) -> None:
+        """Test iECO set to on/off sends the frame/number/switch payload."""
+        msg = PropertiesSet(protocol_version=ProtocolVersion.V1)
+        msg.ieco = value
+        msg.ieco_number = 3
+        body = msg.body
+        assert body[0] == 0xB0
+        assert body[1] == 0x01  # pack count
+        assert body[2] == CapabilityTag.ieco & 0xFF
+        assert body[3] == CapabilityTag.ieco >> 8
+        assert body[4] == 0x0D  # value length: 3 + 10 padding
+        assert body[5] == 0x00  # frame
+        assert body[6] == 0x03  # ieco number
+        assert body[7] == expected_switch  # switch
+        # remaining padding bytes are zero
+        assert body[8:18] == bytearray(10)
+
+    def test_ieco_defaults_number_to_one(self) -> None:
+        """Test iECO uses gear 1 by default when no number is set."""
+        msg = PropertiesSet(protocol_version=ProtocolVersion.V1)
+        msg.ieco = True
+        body = msg.body
+        assert body[6] == 0x01
+
+    def test_ieco_absent_when_unset(self) -> None:
+        """Test iECO is not packed when left as None."""
+        msg = PropertiesSet(protocol_version=ProtocolVersion.V1)
+        body = msg.body
+        assert body[1] == 0x00  # no params packed
+
+
+class TestMessageSetAnion:
+    """Test StateSet anion (purifier) bit."""
 
     @pytest.mark.parametrize(
         ("value", "expected_bit"),
@@ -2116,6 +2666,6 @@ class TestMessageGeneralSetAnion:
     )
     def test_anion_bit_in_body(self, value: bool, expected_bit: int) -> None:
         """Test anion sets bit 0x20 in body byte index 8."""
-        msg = MessageGeneralSet(protocol_version=ProtocolVersion.V1)
+        msg = StateSet(protocol_version=ProtocolVersion.V1)
         msg.anion = value
         assert msg._body[8] & 0x20 == expected_bit

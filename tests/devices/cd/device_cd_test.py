@@ -8,8 +8,13 @@ from midealan.const import ProtocolVersion
 from midealan.devices.cd import DeviceAttributes, LuaProtocol, MideaCDDevice
 from midealan.devices.cd.message import (
     MessageQuery,
+    MessageQueryB1,
     MessageQueryDaily,
     MessageQueryWeekly,
+    MessageSetDaily,
+    MessageSetMaintenance,
+    MessageSetSterilize,
+    MessageSetWeekly,
 )
 from midealan.message import MessageType
 
@@ -267,6 +272,72 @@ class TestMideaCDDevice:
         assert status[DeviceAttributes.auto_sterilize_minute.value] == 5
 
     # ------------------------------------------------------------------ #
+    # power must survive a SET echo (midea_ac_lan#768)                    #
+    # ------------------------------------------------------------------ #
+
+    def test_set_echo_does_not_clobber_power(self) -> None:
+        """A SET echo with power=False must not overwrite a trusted ON state.
+
+        Otherwise the stale OFF is replayed into the next temperature/mode
+        control frame and silently switches the unit off.
+        """
+        self.device._attributes[DeviceAttributes.power] = True
+
+        class FakeSetEcho:
+            message_type = MessageType.set
+            power = False
+
+        with patch(
+            "midealan.devices.cd.MessageCDResponse",
+            return_value=FakeSetEcho(),
+        ):
+            status = self.device.process_message(b"")
+
+        assert self.device._attributes[DeviceAttributes.power] is True
+        assert status[DeviceAttributes.power.value] is True
+
+    def test_status_frame_updates_power(self) -> None:
+        """A genuine status/notify frame still updates the power state."""
+        self.device._attributes[DeviceAttributes.power] = True
+
+        class FakeStatus:
+            message_type = MessageType.notify1
+            power = False
+
+        with patch(
+            "midealan.devices.cd.MessageCDResponse",
+            return_value=FakeStatus(),
+        ):
+            status = self.device.process_message(b"")
+
+        assert self.device._attributes[DeviceAttributes.power] is False
+        assert status[DeviceAttributes.power.value] is False
+
+    def test_set_power_persists_requested_state(self) -> None:
+        """A power write must store the requested state immediately.
+
+        The SET-echo guard distrusts the power bit from echoes, so the
+        explicitly requested power must be persisted in set_attribute.
+        Otherwise a temperature/mode write before the next genuine status
+        frame would replay the stale value as an OFF command (midea_ac_lan#768).
+        """
+        self.device._attributes[DeviceAttributes.power] = False
+
+        with patch.object(self.device, "build_send"):
+            self.device.set_attribute(DeviceAttributes.power.value, True)
+
+        assert self.device._attributes[DeviceAttributes.power] is True
+
+    def test_set_power_off_persists_requested_state(self) -> None:
+        """A power-off write is persisted immediately too."""
+        self.device._attributes[DeviceAttributes.power] = True
+
+        with patch.object(self.device, "build_send"):
+            self.device.set_attribute(DeviceAttributes.power.value, False)
+
+        assert self.device._attributes[DeviceAttributes.power] is False
+
+    # ------------------------------------------------------------------ #
     # disinfection_temperature is read-only for CD                         #
     # ------------------------------------------------------------------ #
 
@@ -435,6 +506,8 @@ class TestMideaCDDevice:
 
     def test_process_set_echo_updates_fields(self) -> None:
         """A controlType=0x01 SET echo stores fields for later writes."""
+        # Pre-set power so the SET echo guard doesn't change test behavior
+        self.device._attributes[DeviceAttributes.power] = True
         body = bytearray([0x01, 0x01, 0x01, 0x02, 110, 1, 2, 3, 0x10, 0x00, 30])
         new_status = self.device.process_message(
             _build_message(MessageType.set, body),
@@ -445,6 +518,7 @@ class TestMideaCDDevice:
             "ptcTemp": 3,
             "byte8": 0x10,
         }
+        # Power is not updated from SET echoes (midea_ac_lan#768 fix)
         assert self.device.attributes[DeviceAttributes.power] is True
         assert self.device.attributes[DeviceAttributes.mode] == "Standard"
         assert self.device.attributes[DeviceAttributes.target_temperature] == 40
@@ -458,6 +532,13 @@ class TestMideaCDDevice:
             {"trValue": "abc", "openPTC": 1, "ptcTemp": 2, "byte8": 0x10},
         )
         assert clean == {}
+
+    def test_sanitize_set_fields_keeps_valid_tr_value_only(self) -> None:
+        """A valid trValue survives while unsafe SET echo fields are dropped."""
+        clean = MideaCDDevice._sanitize_set_fields(
+            {"trValue": "5", "openPTC": 1, "ptcTemp": 2, "byte8": 0x10},
+        )
+        assert clean == {"trValue": "5"}
 
     def test_process_weekly_schedule_message(self) -> None:
         """A weekly schedule frame stores the parsed schedule."""
@@ -572,6 +653,29 @@ class TestMideaCDDevice:
         assert DeviceAttributes.disinfection_temperature.value not in status
         assert self.device.attributes[DeviceAttributes.disinfection_temperature] == 67.0
 
+    def test_process_message_empty_sterilize_schedule_fields_are_skipped(self) -> None:
+        """None sterilize schedule values do not publish updates."""
+        self.device._attributes[DeviceAttributes.auto_sterilize_week] = 4
+        self.device._attributes[DeviceAttributes.auto_sterilize_hour] = 8
+        self.device._attributes[DeviceAttributes.auto_sterilize_minute] = 15
+
+        class FakeMessage:
+            auto_sterilize_week = None
+            auto_sterilize_hour = None
+            auto_sterilize_minute = None
+
+        with patch(
+            "midealan.devices.cd.MessageCDResponse",
+            return_value=FakeMessage(),
+        ):
+            status = self.device.process_message(b"")
+        assert DeviceAttributes.auto_sterilize_week.value not in status
+        assert DeviceAttributes.auto_sterilize_hour.value not in status
+        assert DeviceAttributes.auto_sterilize_minute.value not in status
+        assert self.device.attributes[DeviceAttributes.auto_sterilize_week] == 4
+        assert self.device.attributes[DeviceAttributes.auto_sterilize_hour] == 8
+        assert self.device.attributes[DeviceAttributes.auto_sterilize_minute] == 15
+
     def test_process_message_forced_conversions_rsjrac06(self) -> None:
         """RSJRAC06 forces fahrenheit outdoor and old-protocol current temps."""
         device = _make_device(model="RSJRAC06")
@@ -641,9 +745,17 @@ class TestMideaCDDevice:
 
     def test_set_mode_invalid_value_not_sent(self) -> None:
         """Invalid mode values do not send a command."""
-        with patch.object(self.device, "build_send") as mock_send:
+        with (
+            patch.object(self.device, "build_send") as mock_send,
+            patch("midealan.devices.cd._LOGGER.warning") as mock_warning,
+        ):
             self.device.set_attribute(DeviceAttributes.mode.value, "Bogus")
             mock_send.assert_not_called()
+            mock_warning.assert_called_once_with(
+                "[%s] Invalid mode value: %s, not sending command",
+                self.device.device_id,
+                "Bogus",
+            )
 
     def test_set_mode_standard(self) -> None:
         """A valid mode value is mapped to its key and sent."""
@@ -718,3 +830,228 @@ class TestMideaCDDevice:
         """RSJRAC01 resolves the auto lua protocol to new."""
         device = _make_device(model="RSJRAC01")
         assert device._lua_protocol == LuaProtocol.new
+
+
+class TestMideaCDExtendedDevice:
+    """Extended controls are enabled by reported protocol capabilities."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_device(self) -> None:
+        """Create a generic CD and mark it extended through reported limits."""
+        self.device = _make_device()
+        self.device._attributes[DeviceAttributes.max_temperature_lower_limit] = 35.0
+        self.device._attributes[DeviceAttributes.max_temperature_upper_limit] = 70.0
+
+    def test_official_mode_names_and_b1_query(self) -> None:
+        """Capabilities expose NetHome mode labels and the B1 query."""
+        assert self.device.preset_modes == [
+            "Economy",
+            "Hybrid",
+            "E-Heater",
+            "Smart",
+        ]
+        queries = self.device.build_query()
+        assert len(queries) == 4
+        assert isinstance(queries[-1], MessageQueryB1)
+
+    def test_false_capabilities_do_not_enable_extended_protocol(self) -> None:
+        """Only positive capability evidence enables extended semantics."""
+        device = _make_device()
+        device._attributes[DeviceAttributes.support_boost_mode] = False
+        device._attributes[DeviceAttributes.support_silent_mode] = False
+
+        assert device._is_extended_water_heater() is False
+        device._attributes[DeviceAttributes.new_version_water_heater] = True
+        assert device._is_extended_water_heater() is True
+
+    def test_optional_modes_follow_reported_capabilities(self) -> None:
+        """Optional modes appear only after their capability is reported."""
+        self.device._attributes[DeviceAttributes.support_heat_pump_mode] = True
+        self.device._attributes[DeviceAttributes.support_boost_mode] = True
+        self.device._attributes[DeviceAttributes.support_silent_mode] = True
+        assert self.device.preset_modes == [
+            "Economy",
+            "Hybrid",
+            "E-Heater",
+            "Smart",
+            "Heat-pump",
+            "Boost",
+            "Silent",
+        ]
+
+    def test_baseline_modes_follow_explicit_capabilities(self) -> None:
+        """Explicitly unsupported baseline modes are not advertised."""
+        self.device._attributes[DeviceAttributes.support_electric_mode] = False
+        self.device._attributes[DeviceAttributes.support_smart_mode] = False
+
+        assert self.device.preset_modes == ["Economy", "Hybrid"]
+
+    def test_disinfection_write_uses_extended_payload(self) -> None:
+        """Immediate disinfection preserves schedule and setpoint."""
+        self.device._attributes[DeviceAttributes.disinfection_temperature] = 67.0
+        self.device._attributes[DeviceAttributes.auto_sterilize_week] = 4
+        self.device._attributes[DeviceAttributes.auto_sterilize_hour] = 14
+        self.device._attributes[DeviceAttributes.auto_sterilize_minute] = 5
+        with patch.object(self.device, "build_send") as mock_send:
+            self.device.set_attribute(DeviceAttributes.disinfect.value, True)
+        message = mock_send.call_args.args[0]
+        assert isinstance(message, MessageSetSterilize)
+        assert message.body == bytearray([0x06, 0x01, 0x80, 4, 14, 5, 67])
+
+    def test_disinfection_defaults_temperature_and_rejects_mapping(self) -> None:
+        """Extended disinfection has a safe default and rejects mappings."""
+        self.device._attributes[DeviceAttributes.disinfection_temperature] = None
+        with patch.object(self.device, "build_send") as mock_send:
+            self.device.set_attribute(DeviceAttributes.disinfect.value, True)
+            message = mock_send.call_args.args[0]
+            assert message.disinfection_temperature == 60.0
+            mock_send.reset_mock()
+            self.device.set_attribute(DeviceAttributes.disinfect.value, {})
+            mock_send.assert_not_called()
+
+    def test_schedule_writes_require_support_and_mapping(self) -> None:
+        """Weekly and daily mappings use their dedicated message types."""
+        weekly_schedule = {0: [{"opentime": "6"}]}
+        daily_schedule = {"amount": "1", "timers": [{"openhour": "6"}]}
+        with patch.object(self.device, "build_send") as mock_send:
+            self.device.set_attribute(
+                DeviceAttributes.weekly_schedule.value,
+                weekly_schedule,
+            )
+            weekly = mock_send.call_args.args[0]
+            assert isinstance(weekly, MessageSetWeekly)
+            assert weekly.weekly_schedule == weekly_schedule
+            self.device.set_attribute(
+                DeviceAttributes.daily_timer_schedule.value,
+                daily_schedule,
+            )
+            daily = mock_send.call_args.args[0]
+            assert isinstance(daily, MessageSetDaily)
+            assert daily.daily_timer_schedule == daily_schedule
+            mock_send.reset_mock()
+            self.device.set_attribute(DeviceAttributes.weekly_schedule.value, True)
+            mock_send.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("attribute", "schedule"),
+        [
+            (DeviceAttributes.daily_timer_schedule, {"timers": None}),
+            (DeviceAttributes.daily_timer_schedule, {"timers": [None]}),
+            (DeviceAttributes.daily_timer_schedule, {"amount": None}),
+            (DeviceAttributes.daily_timer_schedule, {"amount": True}),
+            (DeviceAttributes.daily_timer_schedule, {"single_timer_on": 1}),
+            (DeviceAttributes.daily_timer_schedule, {"single_timer_off": "false"}),
+            (
+                DeviceAttributes.daily_timer_schedule,
+                {"timers": [{"openhour": None}]},
+            ),
+            (DeviceAttributes.daily_timer_schedule, {"timers": [{"effect": 1}]}),
+            (DeviceAttributes.weekly_schedule, {0: None}),
+            (DeviceAttributes.weekly_schedule, {0: [None]}),
+            (DeviceAttributes.weekly_schedule, {"0": []}),
+            (DeviceAttributes.weekly_schedule, {0: [{"opentime": None}]}),
+            (DeviceAttributes.weekly_schedule, {0: [{"mode": False}]}),
+            (DeviceAttributes.weekly_schedule, {0: [{"effect": "false"}]}),
+        ],
+    )
+    def test_schedule_writes_reject_invalid_timer_data(
+        self,
+        attribute: DeviceAttributes,
+        schedule: dict[object, object],
+    ) -> None:
+        """Malformed nested timer collections never build a control frame."""
+        with patch.object(self.device, "build_send") as mock_send:
+            self.device.set_attribute(attribute.value, schedule)
+        mock_send.assert_not_called()
+
+    def test_scalar_controls_reject_mappings(self) -> None:
+        """Ordinary scalar controls never accept schedule-like mappings."""
+        with patch.object(self.device, "build_send") as mock_send:
+            self.device.set_attribute(DeviceAttributes.power.value, {})
+            self.device.set_attribute(
+                DeviceAttributes.maintenance_reminder.value,
+                {"enabled": True},
+            )
+            self.device.set_attribute(
+                DeviceAttributes.maintain_warn_tag.value,
+                {"enabled": True},
+            )
+        mock_send.assert_not_called()
+
+    def test_max_temperature_is_clamped_to_reported_limit(self) -> None:
+        """Maximum target temperature uses BasicControl byte 23."""
+        self.device._attributes[DeviceAttributes.max_temperature_lower_limit] = 40.0
+        self.device._attributes[DeviceAttributes.max_temperature_upper_limit] = 68.0
+        with patch.object(self.device, "build_send") as mock_send:
+            self.device.set_attribute(DeviceAttributes.max_temperature.value, 75.0)
+        message = mock_send.call_args.args[0]
+        assert message.body[23] == 68
+
+    def test_max_temperature_clamps_target_and_schedule_mode(self) -> None:
+        """Reducing the maximum also clamps target; schedule mode stays 0..2."""
+        self.device._attributes[DeviceAttributes.target_temperature] = 69.0
+        with patch.object(self.device, "build_send") as mock_send:
+            self.device.set_attribute(DeviceAttributes.max_temperature.value, 65.0)
+            maximum = mock_send.call_args.args[0]
+            assert maximum.target_temperature == 65.0
+            self.device.set_attribute(DeviceAttributes.schedule_mode.value, 9.0)
+            schedule = mock_send.call_args.args[0]
+            assert schedule.schedule_mode == 2
+
+    def test_maintenance_preserves_b1_flags(self) -> None:
+        """Maintenance B0 control preserves priority, warning and reserved bits."""
+        self.device._attributes[DeviceAttributes.b0_reserved_flags] = 0x18
+        self.device._attributes[DeviceAttributes.ac_heater_priority] = True
+        self.device._attributes[DeviceAttributes.high_temp_reminder] = True
+        with patch.object(self.device, "build_send") as mock_send:
+            self.device.set_attribute(
+                DeviceAttributes.maintenance_reminder.value,
+                False,
+            )
+        message = mock_send.call_args.args[0]
+        assert isinstance(message, MessageSetMaintenance)
+        assert message.body[5] == 0x1B
+
+    def test_maintenance_warning_uses_canonical_extended_flag(self) -> None:
+        """Extended heaters mirror the stable canonical maintenance flag."""
+        body = bytearray(69)
+        body[0] = 0x01
+        body[38] = 0x40  # canonical true, legacy 0x80 false
+        body[57] = 70
+        body[58] = 35
+
+        status = self.device.process_message(_build_message(MessageType.query, body))
+
+        assert status[DeviceAttributes.maintenance_reminder.value] is True
+        assert status[DeviceAttributes.maintain_warn.value] is True
+        assert self.device.attributes[DeviceAttributes.maintain_warn] is True
+
+    def test_short_status_uses_persisted_extended_capabilities(self) -> None:
+        """Short responses retain learned mode and maintenance semantics."""
+        body = bytearray(57)
+        body[0] = 0x01
+        body[2] = 0x04
+        body[38] = 0x40
+
+        status = self.device.process_message(_build_message(MessageType.query, body))
+
+        assert status[DeviceAttributes.mode.value] == "Hybrid"
+        assert status[DeviceAttributes.maintain_warn.value] is True
+
+    def test_legacy_maintenance_warning_keeps_raw_bit(self) -> None:
+        """Legacy heaters continue to expose the independent raw warning bit."""
+        device = _make_device()
+        body = bytearray(57)
+        body[0] = 0x01
+        body[38] = 0x40
+
+        status = device.process_message(_build_message(MessageType.query, body))
+
+        assert status[DeviceAttributes.maintenance_reminder.value] is True
+        assert status[DeviceAttributes.maintain_warn.value] is False
+
+    def test_auto_disinfect_remains_read_only(self) -> None:
+        """Automatic disinfection status is not exposed as an invented toggle."""
+        with patch.object(self.device, "build_send") as mock_send:
+            self.device.set_attribute(DeviceAttributes.auto_disinfect.value, True)
+        mock_send.assert_not_called()

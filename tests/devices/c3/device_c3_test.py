@@ -182,9 +182,9 @@ class TestMideaC3Device:
             assert result[DeviceAttributes.disinfect.value] is False
             assert result[DeviceAttributes.fast_dhw.value] is True
             assert result[DeviceAttributes.zone_temp_type.value] == [True, False]
-            assert result[DeviceAttributes.zone1_room_temp_mode.value] is True
+            assert result[DeviceAttributes.zone1_room_temp_mode.value] is False
             assert result[DeviceAttributes.zone2_room_temp_mode.value] is False
-            assert result[DeviceAttributes.zone1_water_temp_mode.value] is False
+            assert result[DeviceAttributes.zone1_water_temp_mode.value] is True
             assert result[DeviceAttributes.zone2_water_temp_mode.value] is False
             assert result[DeviceAttributes.mode.value] == 2
             assert result[DeviceAttributes.mode_auto.value] == 2
@@ -216,12 +216,45 @@ class TestMideaC3Device:
 
             result = self.device.process_message(b"")
 
+            assert result[DeviceAttributes.zone1_room_temp_mode.value] is True
+            assert result[DeviceAttributes.zone2_room_temp_mode.value] is False
+            assert result[DeviceAttributes.zone1_water_temp_mode.value] is False
+            assert result[DeviceAttributes.zone2_water_temp_mode.value] is True
+
             mock_message.zone1_power = False
             mock_message.zone2_power = False
 
             result = self.device.process_message(b"")
 
             assert result[DeviceAttributes.mode.value] == 3
+
+    def test_process_message_without_zone_temp_type(self) -> None:
+        """Test process message without zone temperature metadata."""
+
+        class FakeMessage:
+            zone1_power = True
+            zone2_power = False
+            dhw_power = True
+
+        with patch("midealan.devices.c3.MessageC3Response") as mock_message_response:
+            mock_message_response.return_value = FakeMessage()
+
+            result = self.device.process_message(b"")
+
+        assert result[DeviceAttributes.zone1_power.value] is True
+        assert DeviceAttributes.zone_temp_type.value not in result
+
+    def test_process_message_without_any_known_attributes(self) -> None:
+        """Test process message when no known attributes are present."""
+
+        class FakeMessage:
+            pass
+
+        with patch("midealan.devices.c3.MessageC3Response") as mock_message_response:
+            mock_message_response.return_value = FakeMessage()
+            result = self.device.process_message(b"")
+
+        assert result == {}
 
     def test_set_target_temperature(self) -> None:
         """Test set target temperature."""
@@ -263,7 +296,115 @@ class TestMideaC3Device:
             assert message.zone2_power is True
             assert message.mode == C3DeviceMode.HEAT
 
+    def test_set_mode_none_target_uses_existing_zone_state(self) -> None:
+        """Test set target temperature without mode keeps power untouched."""
+        self.device._attributes[DeviceAttributes.mode] = C3DeviceMode.HEAT
+        self.device._attributes[DeviceAttributes.zone2_power] = True
+        existing_zone2_power = self.device._attributes[DeviceAttributes.zone2_power]
+        with patch.object(self.device, "build_send") as mock_build_send:
+            self.device.set_target_temperature(23, None, 1)
+            mock_build_send.assert_called_once()
+            message = mock_build_send.call_args[0][0]
+            assert message.room_target_temp == 23
+            assert message.mode == C3DeviceMode.HEAT
+            assert message.zone2_power == existing_zone2_power
+
+    def test_set_attribute_unknown_value_is_ignored(self) -> None:
+        """Unknown attributes do not build a message."""
+        with patch.object(self.device, "build_send") as mock_build_send:
+            self.device.set_attribute("unknown_attribute", True)
+        mock_build_send.assert_not_called()
+
+    def test_set_silent_level_ignores_non_string_value(self) -> None:
+        """Silent level updates ignore non-string inputs."""
+        with patch.object(self.device, "build_send") as mock_build_send:
+            self.device.set_attribute(DeviceAttributes.silent_level.value, True)
+        mock_build_send.assert_not_called()
+
+    def test_set_customize_without_temperature_step(self) -> None:
+        """Customize JSON without temperature_step still updates defaults."""
+        with patch.object(self.device, "update_all") as mock_update_all:
+            self.device.set_customize('{"other": 1}')
+        mock_update_all.assert_called_once_with(
+            {"temperature_step": self.device._default_temperature_step},
+        )
+        assert self.device.temperature_step == self.device._default_temperature_step
+
+    def test_set_customize_empty_string_keeps_default(self) -> None:
+        """Empty customize input resets to default without updating state."""
+        with patch.object(self.device, "update_all") as mock_update_all:
+            self.device.set_customize("")
+        mock_update_all.assert_not_called()
+        assert self.device.temperature_step == self.device._default_temperature_step
+
     def test_invalid_customize_format(self) -> None:
         """Test invalid customize format."""
         self.device.set_customize("{")
         self.device.set_customize('{"temperature_step":"10"}')
+
+    def test_process_message_unit_para_exposes_odu_runtime(self) -> None:
+        """Test X10 outdoor-unit runtime values reach the device attributes."""
+        # Real-device X10 (UNITPARA) frame: compressor 0x39 = 57 Hz, mode
+        # 0x02 = cooling, outdoor fan 0x40 = 640 RPM.
+        header = bytearray(
+            [0xAA, 0x00, 0xC3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x03],
+        )
+        body = bytearray(88)  # body type + 86 data bytes + CRC
+        body[0] = 0x10
+        body[1:5] = b"\x39\x02\x40\x02"
+
+        new_status = self.device.process_message(bytes(header + body))
+
+        assert new_status[DeviceAttributes.comp_run_freq.value] == 57
+        assert new_status[DeviceAttributes.unit_mode_run.value] == C3DeviceMode.COOL
+        assert new_status[DeviceAttributes.fan_speed.value] == 640
+        assert self.device.attributes[DeviceAttributes.comp_run_freq] == 57
+        assert self.device.attributes[DeviceAttributes.unit_mode_run] == 2
+        assert self.device.attributes[DeviceAttributes.fan_speed] == 640
+
+    def test_process_message_unit_para_exposes_odu_telemetry(self) -> None:
+        """Test the X10 telemetry values reach the device attributes.
+
+        Real capture from a Hyundai HYHC-V30W/D2RN8 (OEM-equivalent Midea
+        MHC-V30W/D2RN8, protocol 3, module 171H120F). The unit serial in the
+        tail of the frame has been replaced with zeroes; no parsed field is
+        affected.
+        """
+        header = bytearray(
+            [0xAA, 0x00, 0xC3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x03],
+        )
+        body = bytes.fromhex(
+            "1021023f0205002426500d0b7f070000000300e200881e0100000000040081482048"
+            "0b190a0919197f7f64042400640f03220c3536ffff00000000000000000000006300"
+            "002fa000000000000008c90000000000e600000000000000000015172d2d2d2d2d2d"
+            "2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d"
+            "2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d30303030303030303030"
+            "303030303030303030303030303030303030303030300000000000000000",
+        )
+
+        new_status = self.device.process_message(bytes(header + body + bytes(1)))
+
+        expected = {
+            "comp_run_freq": 33,
+            "unit_mode_run": 2,
+            "fan_speed": 630,
+            "fg_capacity_need": 5,
+            "temp_t3": 36,
+            "temp_tp": 80,
+            "temp_tw_in": 13,
+            "temp_tw_out": 11,
+            "odu_comp_current": 3,
+            "odu_voltage": 226,
+            "exv_current": 136,
+            "temp_t1": 11,
+            "temp_t2": 10,
+            "temp_t2b": 9,
+            "pressure_high": 1060,
+            "pressure_low": 100,
+            "temp_th": 15,
+            "odu_target_fre": 34,
+            "temp_tf": 54,
+        }
+        for name, value in expected.items():
+            assert new_status[name] == value, name
+            assert self.device.attributes[DeviceAttributes[name]] == value, name

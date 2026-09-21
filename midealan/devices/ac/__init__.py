@@ -12,47 +12,53 @@ from midealan.device import MideaDevice, MideaDeviceInitKwargs
 from midealan.message import ListTypes
 
 from .message import (
+    CapabilitiesAdditionalQuery,
+    CapabilitiesQuery,
+    CapabilityValue,
+    GroupOneQuery,
+    GroupSevenQuery,
+    GroupTwoQuery,
+    GroupZeroQuery,
+    HumidityQuery,
     MessageACResponse,
-    MessageCapabilitiesAdditionalQuery,
-    MessageCapabilitiesQuery,
-    MessageGeneralSet,
-    MessageGroupOneQuery,
-    MessageGroupSevenQuery,
-    MessageGroupTwoQuery,
-    MessageGroupZeroQuery,
-    MessageHumidityQuery,
-    MessageNewProtocolQuery,
-    MessageNewProtocolSelfCleanQuery,
-    MessageNewProtocolSet,
-    MessagePowerQuery,
-    MessageQuery,
-    MessageSubProtocolFreshAirSet,
-    MessageSubProtocolQuery,
-    MessageSubProtocolQuery10,
-    MessageSubProtocolQuery11,
-    MessageSubProtocolQuery30,
     MessageSubProtocolSet,
-    MessageToggleDisplay,
+    PowerQuery,
+    PropertiesQuery,
+    PropertiesSet,
+    StateQuery,
+    StateSet,
+    SubProtocolFreshAirSet,
+    SubProtocolQuery,
+    SubProtocolQuery10,
+    SubProtocolQuery11,
+    SubProtocolQuery30,
+    ToggleDisplay,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 ACQuery = (
-    MessageSubProtocolQuery
-    | MessageQuery
-    | MessageNewProtocolQuery
-    | MessagePowerQuery
-    | MessageHumidityQuery
-    | MessageGroupZeroQuery
-    | MessageGroupOneQuery
-    | MessageGroupTwoQuery
-    | MessageGroupSevenQuery
-    | MessageCapabilitiesQuery
-    | MessageCapabilitiesAdditionalQuery
+    SubProtocolQuery
+    | StateQuery
+    | PropertiesQuery
+    | PowerQuery
+    | HumidityQuery
+    | GroupZeroQuery
+    | GroupOneQuery
+    | GroupTwoQuery
+    | GroupSevenQuery
+    | CapabilitiesQuery
+    | CapabilitiesAdditionalQuery
 )
 
 # AC mode constants
 DRY_MODE = 3
+
+# Maps the reported mode value to the capabilities["temperature"] range key.
+# auto=1, cool=2, dry=3, heat=4, fan=5; dry and fan reuse the cool range.
+TEMPERATURE_LIMIT_MODE_KEYS = {1: "auto", 2: "cool", 3: "cool", 4: "heat", 5: "cool"}
+# Fallback range key for an unknown mode (e.g. 0 when the unit is off).
+TEMPERATURE_LIMIT_DEFAULT_KEY = "cool"
 
 
 class DeviceAttributes(StrEnum):
@@ -108,6 +114,7 @@ class DeviceAttributes(StrEnum):
     anion = "anion"
     sound = "sound"
     self_clean = "self_clean"
+    ieco = "ieco"
     pmv = "pmv"
     error_code = "error_code"
     # group 1: compressor and refrigerant circuit
@@ -220,12 +227,18 @@ class MideaACDevice(MideaDevice):
         100: "down",
     }
 
-    _rate_selects: ClassVar[dict[int, str]] = {
+    _rate_select_level5: ClassVar[dict[int, str]] = {
         1: "1",
         20: "20",
         40: "40",
         60: "60",
         80: "80",
+        100: "100",
+    }
+
+    _rate_select_level2: ClassVar[dict[int, str]] = {
+        50: "50",
+        75: "75",
         100: "100",
     }
 
@@ -287,6 +300,7 @@ class MideaACDevice(MideaDevice):
                 DeviceAttributes.anion: False,
                 DeviceAttributes.sound: True,
                 DeviceAttributes.self_clean: False,
+                DeviceAttributes.ieco: False,
                 DeviceAttributes.pmv: None,
                 DeviceAttributes.error_code: 0,
                 DeviceAttributes.compressor_frequency: None,
@@ -314,15 +328,30 @@ class MideaACDevice(MideaDevice):
         )
         self._fresh_air_version: DeviceAttributes | None = None
         self._pending_self_clean: tuple[bool, float] | None = None
+        # Current iECO gear the device reports; echoed back when setting iECO.
+        self._ieco_number: int = 1
         self._default_temperature_step: float = 0.5
         self._temperature_step: float = 0.5
         self._used_subprotocol: bool = self._model_capabilities.uses_bb_protocol
         self._bb_sn8_flag: bool = False
         self._bb_timer: bool = False
-        # per-mode setpoint limits from the B5 capability, keyed by mode value
-        self._temperature_limits: dict[int, tuple[float, float]] | None = None
-        # decoded B5 capability flags (accumulated across B5 frames)
-        self._capabilities: dict[str, bool] = {}
+        # decoded B5 capability flags (accumulated across B5 frames). Values are
+        # mostly booleans, but some are ints (e.g. rate_select level count) or a
+        # nested per-mode setpoint-limit map (the "temperature" key).
+        self._capabilities: dict[str, CapabilityValue] = {}
+        # user-provided capability overrides from customize. Merged over the
+        # B5-parsed values (see the capabilities property), so a user can force
+        # a feature the B5 query missed, or disable one it reported in error.
+        self._customize_capabilities: dict[str, CapabilityValue] = {}
+        # B5 capability query control. Both queries run once, like the appliance
+        # query: on success the flag is cleared so it is never re-sent (the reply
+        # never changes); on timeout the device layer records it in
+        # _unsupported_protocol so it is skipped too. The additional query is
+        # only armed after the basic frame advertises a second frame.
+        self._capability_query = True
+        self._capability_addition_query = False
+        self._support_capability = False
+        self._support_capability_addition = False
         # manual setpoint limits from customize (highest priority)
         self._customize_min_temperature: float | None = None
         self._customize_max_temperature: float | None = None
@@ -366,10 +395,24 @@ class MideaACDevice(MideaDevice):
         """Midea AC device wind_ud_angle."""
         return list(MideaACDevice._wind_ud_angles.values())
 
+    def _rate_select_map(self) -> dict[int, str]:
+        """Return the rate_select value map for the device-reported level count.
+
+        The electricity_capability reports a rate level count: 1 selects the
+        2-gear map (50/75/100), 2 or 3 select the 5-gear map. Anything else
+        (including 0/unsupported) yields an empty map so no options are offered.
+        """
+        _levels = cast("int", self.capabilities.get("rate_select", 0))
+        if _levels in (2, 3):
+            return MideaACDevice._rate_select_level5
+        if _levels == 1:
+            return MideaACDevice._rate_select_level2
+        return {}
+
     @property
     def rate_selects(self) -> list[str]:
         """Midea AC device rate_select options."""
-        return list(MideaACDevice._rate_selects.values())
+        return list(self._rate_select_map().values())
 
     def build_query(self) -> list[ACQuery]:
         """Midea AC device build query."""
@@ -378,31 +421,68 @@ class MideaACDevice(MideaDevice):
             # its own identity so an unsupported response for one group does not
             # suppress later status groups.
             return [
-                MessageSubProtocolQuery10(self._message_protocol_version),
-                MessageSubProtocolQuery11(self._message_protocol_version),
-                MessageSubProtocolQuery30(self._message_protocol_version),
+                SubProtocolQuery10(self._message_protocol_version),
+                SubProtocolQuery11(self._message_protocol_version),
+                SubProtocolQuery30(self._message_protocol_version),
             ]
         queries: list[ACQuery] = [
-            MessageQuery(self._message_protocol_version),
-            MessageNewProtocolQuery(
+            StateQuery(self._message_protocol_version),
+            # Single new-protocol query. Status feature tags (self_clean,
+            # rate_select, ...) are appended by PropertiesQuery automatically
+            # from the merged capabilities map (B5-parsed values overlaid with
+            # customize overrides), so an unsupported tag can't make the device
+            # return an empty list that suppresses the other tags.
+            PropertiesQuery(
                 self._message_protocol_version,
-                supports_rate_select=self._capabilities.get("rate_select", False),
+                capabilities=self.capabilities,
             ),
-            # Queried on its own so an empty response for the combined
-            # new-protocol query does not suppress the self-clean state.
-            MessageNewProtocolSelfCleanQuery(self._message_protocol_version),
-            MessagePowerQuery(self._message_protocol_version),
-            MessageHumidityQuery(self._message_protocol_version),
-            MessageGroupZeroQuery(self._message_protocol_version),
+            PowerQuery(self._message_protocol_version),
+            HumidityQuery(self._message_protocol_version),
+            GroupZeroQuery(self._message_protocol_version),
             # Devices that do not answer a group query are detected during the
             # initial protocol check and the query is skipped from then on.
-            MessageGroupOneQuery(self._message_protocol_version),
-            MessageGroupTwoQuery(self._message_protocol_version),
-            MessageGroupSevenQuery(self._message_protocol_version),
-            MessageCapabilitiesQuery(self._message_protocol_version),
-            MessageCapabilitiesAdditionalQuery(self._message_protocol_version),
+            GroupOneQuery(self._message_protocol_version),
+            GroupTwoQuery(self._message_protocol_version),
+            GroupSevenQuery(self._message_protocol_version),
+            # Capability queries are not part of the recurring status cycle. They
+            # run once at connect time via build_init_query() while the
+            # _capability_query / _capability_addition_query flags are set.
         ]
         return queries
+
+    def build_init_query(self) -> list[ACQuery]:
+        """Return the B5 capability probes that are still due.
+
+        Both probes are one-shot. The basic query is armed at construction; the
+        additional query is armed only after the basic reply advertises a second
+        frame (see _update_capabilities). Each flag is cleared once its reply is
+        parsed, so a fully-probed device returns an empty list and stops sending
+        capability queries. The subprotocol (BB) devices do not use B5.
+        """
+        if self._used_subprotocol:
+            return []
+        queries: list[ACQuery] = []
+        if self._capability_query:
+            queries.append(CapabilitiesQuery(self._message_protocol_version))
+        if self._capability_addition_query:
+            queries.append(
+                CapabilitiesAdditionalQuery(self._message_protocol_version),
+            )
+        return queries
+
+    def reset_init_query(self) -> None:
+        """Re-arm the B5 capability probes after a socket close.
+
+        Mirrors the appliance-query re-arm: a reconnected device re-probes its
+        capabilities from scratch rather than reusing the previous result. The
+        additional probe stays disarmed until the fresh basic frame advertises a
+        second frame again. Accumulated _capabilities are left in place so the
+        HA integration keeps the last known set until the re-probe overwrites it.
+        """
+        self._capability_query = True
+        self._capability_addition_query = False
+        self._support_capability = False
+        self._support_capability_addition = False
 
     def process_message(self, msg: bytes) -> dict[str, Any]:  # noqa: C901
         """Midea AC device process message."""
@@ -480,8 +560,9 @@ class MideaACDevice(MideaDevice):
                 # wind_ud_angle
                 elif attr == DeviceAttributes.wind_ud_angle:
                     self._attributes[attr] = MideaACDevice._wind_ud_angles.get(value)
+                # rate_select
                 elif attr == DeviceAttributes.rate_select:
-                    self._attributes[attr] = MideaACDevice._rate_selects.get(value)
+                    self._attributes[attr] = self._rate_select_map().get(value)
                 else:
                     self._attributes[attr] = value
                 new_status[str(attr)] = self._attributes[attr]
@@ -509,6 +590,8 @@ class MideaACDevice(MideaDevice):
             self._fresh_air_version = DeviceAttributes.fresh_air_1
         elif self._attributes[DeviceAttributes.fresh_air_2] is not None:
             self._fresh_air_version = DeviceAttributes.fresh_air_2
+        if hasattr(message, "ieco_number"):
+            self._ieco_number = message.ieco_number
         if hasattr(message, "self_clean_active"):
             active = message.self_clean_active
             update_self_clean = True
@@ -528,8 +611,10 @@ class MideaACDevice(MideaDevice):
             if update_self_clean:
                 self._attributes[DeviceAttributes.self_clean] = active
                 new_status[DeviceAttributes.self_clean.value] = active
-        new_status.update(self._refresh_temperature_limits(message))
-        self._update_capabilities(message)
+        # Merge capabilities first so a B5 frame's temperature limits are in the
+        # merged map before the setpoint limits are resolved from it.
+        new_status.update(self._update_capabilities(message))
+        new_status.update(self._refresh_temperature_limits())
         return new_status
 
     @staticmethod
@@ -557,44 +642,297 @@ class MideaACDevice(MideaDevice):
             else self._default_refresh_interval
         )
 
-    def _update_capabilities(self, message: MessageACResponse) -> None:
-        """Accumulate decoded B5 capability flags from a B5 response."""
-        if hasattr(message, "capabilities"):
-            self._capabilities.update(message.capabilities)
+    def _update_capabilities(self, message: MessageACResponse) -> dict[str, Any]:
+        """Merge B5 capability flags and advance the capability query state.
+
+        A B5 reply resolves the query it answered: the basic frame clears
+        _capability_query (and arms the additional query when the device
+        advertises a second frame), while the additional frame clears
+        _capability_addition_query. Both are one-shot, so once cleared here the
+        query is never re-sent.
+
+        Returns a status update carrying the merged ``capabilities`` dict so the
+        consumer (e.g. the HA integration, which reads ``device.capabilities``)
+        is notified as soon as a frame is decoded, instead of holding the empty
+        dict seen at initialization. Returns an empty dict for non-B5 messages.
+        """
+        if not hasattr(message, "capabilities"):
+            return {}
+        self._capabilities.update(message.capabilities)
+
+        additional_pending = self._capability_addition_query
+        if additional_pending:
+            # This reply answers the additional (all_second_frame) query.
+            self._support_capability_addition = True
+            self._capability_addition_query = False
+        else:
+            # This reply answers the basic (all_first_frame) query.
+            self._support_capability = True
+            self._capability_query = False
+            if getattr(message, "additional_capabilities", False):
+                # Device advertises a second frame; arm the additional query so
+                # the next refresh_status() prepends it.
+                self._capability_addition_query = True
+
+        _LOGGER.debug(
+            "[%s] Capability state: support=%s support_addition=%s "
+            "addition_pending=%s merged=%s",
+            self.device_id,
+            self._support_capability,
+            self._support_capability_addition,
+            self._capability_addition_query,
+            self._capabilities,
+        )
+        # Publish the effective (merged) map so downstream consumers see the
+        # customize overrides too; it is already a fresh dict per access.
+        return {"capabilities": self.capabilities}
 
     @property
-    def capabilities(self) -> dict[str, bool]:
-        """Return the decoded B5 capability flags reported by the device."""
-        return self._capabilities
+    def capabilities(self) -> dict[str, CapabilityValue]:
+        """Return the effective capability flags for the device.
 
-    def _b5_temperature_limits(self) -> tuple[float, float] | None:
-        """Return the B5 setpoint limits for the current mode, if any.
-
-        An unknown mode (e.g. 0 when off) falls back to the cool range.
+        This is the B5-parsed capability map overlaid with the user's customize
+        overrides, so a customize entry wins over whatever the device reported
+        (or failed to report).
         """
-        if self._temperature_limits is None:
+        return {**self._capabilities, **self._customize_capabilities}
+
+    @property
+    def supported_hvac_modes(self) -> list[str]:
+        """Return list of supported HVAC modes for Home Assistant.
+
+        Priority: customize > B5 capabilities > default full set.
+
+        Maps device modes to HA climate entity modes:
+        - off (always supported)
+        - auto, cool, heat, dry, fan_only
+
+        Returns:
+            List of HA-compatible HVAC mode strings in canonical order.
+
+        """
+        # Priority 1: customize override (if "modes" explicitly set)
+        if "modes" in self._customize_capabilities:
+            modes = ["off"]
+            customize_modes_raw = self._customize_capabilities["modes"]
+            customize_modes = (
+                customize_modes_raw if isinstance(customize_modes_raw, list) else []
+            )
+            mode_map = ["auto", "cool", "heat", "dry"]
+            modes.extend(mode for mode in mode_map if mode in customize_modes)
+            # fan_only: only if explicitly enabled in customize
+            if self._customize_capabilities.get("fan_only"):
+                modes.append("fan_only")
+            return modes
+
+        # Priority 2: B5 capabilities (if device reported B5 response)
+        if "modes" in self._capabilities:
+            modes = ["off"]
+            device_modes_raw = self._capabilities.get("modes", [])
+            device_modes = (
+                device_modes_raw if isinstance(device_modes_raw, list) else []
+            )
+            mode_map = ["auto", "cool", "heat", "dry"]
+            modes.extend(mode for mode in mode_map if mode in device_modes)
+            # fan_only: only if explicitly enabled in customize
+            if self._customize_capabilities.get("fan_only"):
+                modes.append("fan_only")
+            return modes
+
+        # Priority 3: default full set (for devices without B5 support)
+        modes = ["off", "auto", "cool", "heat", "dry"]
+        # fan_only: only if explicitly enabled in customize
+        if self._customize_capabilities.get("fan_only"):
+            modes.append("fan_only")
+        return modes
+
+    @property
+    def supported_fan_modes(self) -> list[str]:
+        """Return list of supported fan modes for Home Assistant.
+
+        Priority: customize > B5 capabilities > default full set.
+
+        Maps device fan speeds to HA fan mode names in canonical order.
+        Special case: if "custom" is in the list, return full set.
+
+        Returns:
+            List of HA-compatible fan mode strings.
+
+        """
+        fan_map = ["auto", "silent", "low", "medium", "high", "custom"]
+
+        # Priority 1: customize override (if "fan_speeds" explicitly set)
+        if "fan_speeds" in self._customize_capabilities:
+            customize_speeds_raw = self._customize_capabilities["fan_speeds"]
+            customize_speeds = (
+                customize_speeds_raw if isinstance(customize_speeds_raw, list) else []
+            )
+            return [speed for speed in fan_map if speed in customize_speeds]
+
+        # Priority 2: B5 capabilities (if device reported B5 response)
+        if "fan_speeds" in self._capabilities:
+            device_speeds_raw = self._capabilities.get("fan_speeds", [])
+            device_speeds = (
+                device_speeds_raw if isinstance(device_speeds_raw, list) else []
+            )
+            # If custom is in the list, return full set
+            if "custom" in device_speeds:
+                return fan_map
+            return [speed for speed in fan_map if speed in device_speeds]
+
+        # Priority 3: default full set (for devices without B5 support)
+        return fan_map
+
+    @property
+    def supported_swing_modes(self) -> list[str]:
+        """Return list of supported swing modes for Home Assistant.
+
+        Priority: customize > B5 capabilities > default full set.
+
+        Derives combined swing modes from device capabilities:
+        - off (always supported - no swing)
+        - vertical (if vertical in capabilities)
+        - horizontal (if horizontal in capabilities)
+        - both (if both vertical and horizontal supported)
+
+        Returns:
+            List of HA-compatible swing mode strings.
+
+        """
+        modes = ["off"]  # Always supported
+
+        # Priority 1: customize override (if "swing_modes" explicitly set)
+        if "swing_modes" in self._customize_capabilities:
+            directions_raw = self._customize_capabilities["swing_modes"]
+            directions = directions_raw if isinstance(directions_raw, list) else []
+            has_vertical = "vertical" in directions
+            has_horizontal = "horizontal" in directions
+            if has_vertical:
+                modes.append("vertical")
+            if has_horizontal:
+                modes.append("horizontal")
+            if has_vertical and has_horizontal:
+                modes.append("both")
+            return modes
+
+        # Priority 2: B5 capabilities (if device reported B5 response)
+        if "swing_modes" in self._capabilities:
+            directions_raw = self._capabilities.get("swing_modes", [])
+            directions = directions_raw if isinstance(directions_raw, list) else []
+            has_vertical = "vertical" in directions
+            has_horizontal = "horizontal" in directions
+            if has_vertical:
+                modes.append("vertical")
+            if has_horizontal:
+                modes.append("horizontal")
+            if has_vertical and has_horizontal:
+                modes.append("both")
+            return modes
+
+        # Priority 3: default full set (for devices without B5 support)
+        return ["off", "vertical", "horizontal", "both"]
+
+    @property
+    def supported_preset_modes(self) -> list[str]:
+        """Return list of supported preset modes for Home Assistant.
+
+        Priority: customize > B5 capabilities > default basic set.
+
+        Default presets (always available):
+        - none, comfort, eco, boost, sleep
+
+        B5-only presets (only if reported by device):
+        - ieco (if ieco in capabilities)
+
+        Returns:
+            List of HA-compatible preset mode strings.
+
+        """
+        # Priority 1: customize override
+        # Check if customize has explicit preset feature flags
+        has_customize_features = any(
+            key in self._customize_capabilities
+            for key in [
+                "eco_mode",
+                "ieco",
+                "turbo_cool",
+                "turbo_heat",
+                "sleep_mode",
+                "comfort_mode",
+            ]
+        )
+
+        if has_customize_features:
+            # Use merged capabilities (customize overrides B5)
+            caps = {**self._capabilities, **self._customize_capabilities}
+            presets = ["none"]
+            if caps.get("comfort_mode", True):
+                presets.append("comfort")
+            if caps.get("eco_mode"):
+                presets.append("eco")
+            if caps.get("turbo_cool") or caps.get("turbo_heat"):
+                presets.append("boost")
+            if caps.get("sleep_mode", True):
+                presets.append("sleep")
+            if caps.get("ieco"):
+                presets.append("ieco")
+            return presets
+
+        # Priority 2: B5 capabilities (if device reported B5 response)
+        if self._capabilities:
+            caps = self._capabilities
+            # Check if we have modes (indicator of B5 support)
+            if "modes" in caps:
+                presets = ["none", "comfort"]  # always available
+                if caps.get("eco_mode"):
+                    presets.append("eco")
+                if caps.get("turbo_cool") or caps.get("turbo_heat"):
+                    presets.append("boost")
+                presets.append("sleep")  # always available
+                # B5-only presets
+                if caps.get("ieco"):
+                    presets.append("ieco")
+                return presets
+
+        # Priority 3: default basic set (for devices without B5 support)
+        return ["none", "comfort", "eco", "boost", "sleep"]
+
+    def _capability_temperature_limits(self) -> tuple[float, float] | None:
+        """Return the capability setpoint limits for the current mode, if any.
+
+        Reads the per-mode limits from the merged ``capabilities`` map (the
+        nested ``temperature`` entry). An unknown mode (e.g. 0 when off) falls
+        back to the cool range.
+        """
+        temperature = self.capabilities.get("temperature")
+        if not isinstance(temperature, dict):
             return None
         mode = self._attributes[DeviceAttributes.mode]
-        return self._temperature_limits.get(mode, self._temperature_limits[2])
+        range_key = TEMPERATURE_LIMIT_MODE_KEYS.get(
+            mode,
+            TEMPERATURE_LIMIT_DEFAULT_KEY,
+        )
+        limits = temperature.get(range_key)
+        if not isinstance(limits, dict):
+            return None
+        # Validate that both min and max keys exist before indexing
+        if "min" not in limits or "max" not in limits:
+            return None
+        return (limits["min"], limits["max"])
 
-    def _refresh_temperature_limits(
-        self,
-        message: MessageACResponse | None = None,
-    ) -> dict[str, Any]:
+    def _refresh_temperature_limits(self) -> dict[str, Any]:
         """Resolve min/max setpoint limits.
 
-        Priority: customize option > B5 capability > None (the consumer then
-        falls back to its own default range).
+        Priority: customize option > capability response > None (the consumer
+        then falls back to its own default range).
         """
-        if message is not None and hasattr(message, "temperature_limits"):
-            self._temperature_limits = message.temperature_limits
-        b5 = self._b5_temperature_limits()
+        capability_limits = self._capability_temperature_limits()
         minimum = self._customize_min_temperature
-        if minimum is None and b5 is not None:
-            minimum = b5[0]
+        if minimum is None and capability_limits is not None:
+            minimum = capability_limits[0]
         maximum = self._customize_max_temperature
-        if maximum is None and b5 is not None:
-            maximum = b5[1]
+        if maximum is None and capability_limits is not None:
+            maximum = capability_limits[1]
         self._attributes[DeviceAttributes.min_temperature] = minimum
         self._attributes[DeviceAttributes.max_temperature] = maximum
         return {
@@ -602,9 +940,9 @@ class MideaACDevice(MideaDevice):
             DeviceAttributes.max_temperature.value: maximum,
         }
 
-    def make_message_set(self) -> MessageGeneralSet:
+    def make_message_set(self) -> StateSet:
         """Midea AC device make message set."""
-        message = MessageGeneralSet(self._message_protocol_version)
+        message = StateSet(self._message_protocol_version)
         message.power = self._attributes[DeviceAttributes.power]
         message.prompt_tone = self._attributes[DeviceAttributes.prompt_tone]
         message.mode = self._attributes[DeviceAttributes.mode]
@@ -632,9 +970,9 @@ class MideaACDevice(MideaDevice):
         self,
         attr: str,
         value: bool | float | str,
-    ) -> MessageNewProtocolSet:
+    ) -> PropertiesSet:
         """Midea AC device make newprotocol message set."""
-        message = MessageNewProtocolSet(self._message_protocol_version)
+        message = PropertiesSet(self._message_protocol_version)
 
         # wind_lr_angle
         if attr == DeviceAttributes.wind_lr_angle:
@@ -693,10 +1031,15 @@ class MideaACDevice(MideaDevice):
                 setattr(message, str(self._fresh_air_version), fresh_air)
         # rate_select
         elif attr == DeviceAttributes.rate_select:
-            message.rate_select = MideaACDevice.get_dict_key_by_value(
-                "_rate_selects",
-                str(value),
+            rate_map = self._rate_select_map()
+            message.rate_select = next(
+                (key for key, val in rate_map.items() if val == str(value)),
+                None,
             )
+        # iECO on/off — echo the last reported gear number
+        elif attr == DeviceAttributes.ieco:
+            message.ieco = bool(value)
+            message.ieco_number = self._ieco_number
         # indirect_wind, screen_display_alternate, breezeless
         else:
             setattr(message, str(attr), value)
@@ -728,7 +1071,7 @@ class MideaACDevice(MideaDevice):
         self,
         attr: str,
         value: bool | float | str,
-    ) -> MessageSubProtocolFreshAirSet:
+    ) -> SubProtocolFreshAirSet:
         """Build a BB fresh-air intake or exhaust single-control command."""
         exhaust = attr in {
             DeviceAttributes.fresh_air_exhaust_power,
@@ -778,16 +1121,16 @@ class MideaACDevice(MideaDevice):
             if requested_speed is not None:
                 power = requested_speed > 0
                 speed = requested_speed or current_speed
-        return MessageSubProtocolFreshAirSet(
+        return SubProtocolFreshAirSet(
             self._message_protocol_version,
             power,
             speed,
             exhaust=exhaust,
         )
 
-    def make_message_uniq_set(self) -> MessageSubProtocolSet | MessageGeneralSet:
+    def make_message_uniq_set(self) -> MessageSubProtocolSet | StateSet:
         """Midea AC device make message unique set."""
-        message: MessageSubProtocolSet | MessageGeneralSet
+        message: MessageSubProtocolSet | StateSet
         if self._used_subprotocol:
             message = self.make_subprotocol_message_set()
         else:
@@ -798,11 +1141,11 @@ class MideaACDevice(MideaDevice):
         """Midea AC device set attribute."""
         # if nat a sensor
         message: (
-            MessageToggleDisplay
-            | MessageNewProtocolSet
-            | MessageSubProtocolFreshAirSet
+            ToggleDisplay
+            | PropertiesSet
+            | SubProtocolFreshAirSet
             | MessageSubProtocolSet
-            | MessageGeneralSet
+            | StateSet
             | None
         ) = None
         optimistic_self_clean: bool | None = None
@@ -841,7 +1184,7 @@ class MideaACDevice(MideaDevice):
                 if bool(value) != bool(
                     self._attributes[DeviceAttributes.screen_display],
                 ):
-                    message = MessageToggleDisplay(self._message_protocol_version)
+                    message = ToggleDisplay(self._message_protocol_version)
                     message.prompt_tone = self._attributes[DeviceAttributes.prompt_tone]
             elif self._model_capabilities.has_bb_fresh_air and attr in {
                 DeviceAttributes.fresh_air_power,
@@ -865,6 +1208,7 @@ class MideaACDevice(MideaDevice):
                 DeviceAttributes.out_silent,
                 DeviceAttributes.sound,
                 DeviceAttributes.self_clean,
+                DeviceAttributes.ieco,
             ]:
                 message = self.make_newprotocol_message_set(attr=attr, value=value)
                 if attr == DeviceAttributes.self_clean:
@@ -885,7 +1229,7 @@ class MideaACDevice(MideaDevice):
                     DeviceAttributes.eco_mode,
                 ]:
                     message.boost_mode = False
-                    if isinstance(message, MessageGeneralSet):
+                    if isinstance(message, StateSet):
                         message.power_saving = False
                     message.sleep_mode = False
                     message.eco_mode = False
@@ -902,6 +1246,15 @@ class MideaACDevice(MideaDevice):
                     # Force fan_speed to AUTO when leaving DRY mode
                     if self._attributes[DeviceAttributes.mode] == DRY_MODE:
                         message.fan_speed = 102
+                    # Optimistically reflect the commanded state in the cache so
+                    # an immediate follow-up write (e.g. set_target_temperature,
+                    # which serializes a full packet from make_message_uniq_set)
+                    # is built from power=True and the new mode. Without this the
+                    # follow-up reuses the stale last-confirmed power=False and
+                    # turns the unit back off before the mode response arrives.
+                    # https://github.com/midea-lan/midea-local/issues/495
+                    self._attributes[DeviceAttributes.power] = True
+                    self._attributes[DeviceAttributes.mode] = value
         if message is not None:
             self.build_send(message)
             if optimistic_self_clean is not None:
@@ -918,9 +1271,7 @@ class MideaACDevice(MideaDevice):
         zone: int | None = None,  # noqa: ARG002
     ) -> None:
         """Midea AC device set target temperature."""
-        message: MessageSubProtocolSet | MessageGeneralSet = (
-            self.make_message_uniq_set()
-        )
+        message: MessageSubProtocolSet | StateSet = self.make_message_uniq_set()
         message.target_temperature = target_temperature
         if mode is not None:
             message.power = True
@@ -929,10 +1280,8 @@ class MideaACDevice(MideaDevice):
 
     def set_swing(self, swing_vertical: bool, swing_horizontal: bool) -> None:
         """Midea AC device set swing."""
-        message: MessageSubProtocolSet | MessageGeneralSet = (
-            self.make_message_uniq_set()
-        )
-        if isinstance(message, MessageGeneralSet):
+        message: MessageSubProtocolSet | StateSet = self.make_message_uniq_set()
+        if isinstance(message, StateSet):
             message.swing_vertical = swing_vertical
             message.swing_horizontal = swing_horizontal
         self.build_send(message)
@@ -943,6 +1292,7 @@ class MideaACDevice(MideaDevice):
         self._power_analysis_method = self._default_power_analysis_method
         self._customize_min_temperature = None
         self._customize_max_temperature = None
+        self._customize_capabilities = {}
         if customize and len(customize) > 0:
             try:
                 params = json.loads(customize)
@@ -954,10 +1304,55 @@ class MideaACDevice(MideaDevice):
                     self._customize_min_temperature = params.get("min_temperature")
                 if params and "max_temperature" in params:
                     self._customize_max_temperature = params.get("max_temperature")
+                # Capability overrides let a user force a feature the B5 query
+                # missed (or disable one it wrongly reported). Values follow the
+                # capabilities map: truthy enables the tag, falsy disables it.
+                if params and isinstance(params.get("capabilities"), dict):
+                    caps_input = params["capabilities"]
+                    # Normalize capabilities: convert legacy dict format to array
+                    normalized_caps: dict[str, Any] = {}
+                    for key, value in caps_input.items():
+                        if key in ("modes", "fan_speeds", "swing_modes"):
+                            if isinstance(value, dict):
+                                # Legacy dict format: {"heat": true, "cool": true}
+                                # Convert to array: ["heat", "cool"]
+                                normalized_caps[key] = [
+                                    k for k, v in value.items() if v
+                                ]
+                            elif isinstance(value, list):
+                                # New array format: ["heat", "cool"]
+                                # Validate all elements are strings
+                                if all(isinstance(item, str) for item in value):
+                                    normalized_caps[key] = value
+                                else:
+                                    # Invalid array elements, skip with warning
+                                    _LOGGER.warning(
+                                        "[%s] Invalid capability array for %s: "
+                                        "contains non-string elements",
+                                        self.device_id,
+                                        key,
+                                    )
+                                    continue
+                            else:
+                                # Invalid format, skip with warning
+                                _LOGGER.warning(
+                                    "[%s] Invalid capability format for %s: %s",
+                                    self.device_id,
+                                    key,
+                                    type(value).__name__,
+                                )
+                                continue
+                        else:
+                            # Other capabilities remain as-is
+                            normalized_caps[key] = value
+                    self._customize_capabilities = normalized_caps
             except Exception:
                 _LOGGER.exception("[%s] Set customize error", self.device_id)
             self.update_all({"temperature_step": self._temperature_step})
             self.update_all(self._refresh_temperature_limits())
+        # Publish the merged capabilities map so downstream consumers (e.g., Home
+        # Assistant) are notified whenever customize overrides change it.
+        self.update_all({"capabilities": self.capabilities})
 
 
 class MideaAppliance(MideaACDevice):

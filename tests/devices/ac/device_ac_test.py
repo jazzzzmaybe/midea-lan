@@ -8,25 +8,24 @@ import pytest
 from midealan.const import ProtocolVersion
 from midealan.devices.ac import DeviceAttributes, MideaACDevice
 from midealan.devices.ac.message import (
-    MessageCapabilitiesAdditionalQuery,
-    MessageCapabilitiesQuery,
-    MessageGroupOneQuery,
-    MessageGroupSevenQuery,
-    MessageGroupTwoQuery,
-    MessageGroupZeroQuery,
-    MessageHumidityQuery,
-    MessageNewProtocolQuery,
-    MessageNewProtocolSelfCleanQuery,
-    MessagePowerQuery,
-    MessageQuery,
-    MessageSubProtocolFreshAirSet,
-    MessageSubProtocolQuery,
-    MessageSubProtocolQuery10,
-    MessageSubProtocolQuery11,
-    MessageSubProtocolQuery30,
-    MessageToggleDisplay,
-    NewProtocolTags,
+    CapabilitiesAdditionalQuery,
+    CapabilitiesQuery,
+    CapabilityTag,
+    GroupOneQuery,
+    GroupSevenQuery,
+    GroupTwoQuery,
+    GroupZeroQuery,
+    HumidityQuery,
     PowerFormats,
+    PowerQuery,
+    PropertiesQuery,
+    StateQuery,
+    SubProtocolFreshAirSet,
+    SubProtocolQuery,
+    SubProtocolQuery10,
+    SubProtocolQuery11,
+    SubProtocolQuery30,
+    ToggleDisplay,
 )
 from midealan.message import ListTypes, MessageBase
 
@@ -195,9 +194,22 @@ class TestMideaACDevice:
             message = mock_build_send.call_args[0][0]
             assert message.wind_ud_angle == 1
 
+            # 5-level device: "40" maps back to raw value 40
+            self.device._capabilities["rate_select"] = 2
             self.device.set_attribute(DeviceAttributes.rate_select.value, "40")
             message = mock_build_send.call_args[0][0]
             assert message.rate_select == 40
+
+            # 2-level device: only 50/75/100 are valid gears
+            self.device._capabilities["rate_select"] = 1
+            self.device.set_attribute(DeviceAttributes.rate_select.value, "75")
+            message = mock_build_send.call_args[0][0]
+            assert message.rate_select == 75
+
+            # Value not in the active level map resolves to None
+            self.device.set_attribute(DeviceAttributes.rate_select.value, "40")
+            message = mock_build_send.call_args[0][0]
+            assert message.rate_select is None
 
     def test_set_attribute_fresh_air_mode_named_speed(self) -> None:
         """Test set attribute for fresh air mode with a named fan speed."""
@@ -216,7 +228,7 @@ class TestMideaACDevice:
 
         The firmware exposes a toggle-only command, so setting the switch to
         its current state must send nothing; only a differing request emits a
-        single MessageToggleDisplay.
+        single ToggleDisplay.
         https://github.com/wuwentao/midea_ac_lan/issues/623
         """
         with patch.object(self.device, "build_send") as mock_build_send:
@@ -228,7 +240,7 @@ class TestMideaACDevice:
             # Currently off: turning on sends one toggle.
             self.device.set_attribute(DeviceAttributes.screen_display.value, True)
             mock_build_send.assert_called_once()
-            assert isinstance(mock_build_send.call_args[0][0], MessageToggleDisplay)
+            assert isinstance(mock_build_send.call_args[0][0], ToggleDisplay)
 
             mock_build_send.reset_mock()
 
@@ -240,7 +252,7 @@ class TestMideaACDevice:
             # Currently on: turning off sends one toggle.
             self.device.set_attribute(DeviceAttributes.screen_display.value, False)
             mock_build_send.assert_called_once()
-            assert isinstance(mock_build_send.call_args[0][0], MessageToggleDisplay)
+            assert isinstance(mock_build_send.call_args[0][0], ToggleDisplay)
 
     def test_set_attribute_eco_mode_resets_exclusive_modes(self) -> None:
         """Test eco mode set resets comfort and frost protect on general set."""
@@ -264,56 +276,233 @@ class TestMideaACDevice:
             assert message.dry is False
             assert message.fan_speed == 102
 
+    def test_set_mode_then_temperature_keeps_unit_on(self) -> None:
+        """A mode change followed immediately by a temperature write stays on.
+
+        set_attribute("mode") only forced power=True on the outgoing packet, so
+        a rapid follow-up set_target_temperature (built from make_message_uniq_set)
+        reused the stale last-confirmed power=False and turned the unit back off.
+        The mode change now optimistically caches power=True + the new mode.
+        https://github.com/midea-lan/midea-local/issues/495
+        """
+        # Start from the confirmed "off" state, as after a fresh query.
+        self.device._attributes[DeviceAttributes.power] = False
+        self.device._attributes[DeviceAttributes.mode] = 0
+        with patch.object(self.device, "build_send") as mock_build_send:
+            # 1. set HVAC mode to cool (value 2)
+            self.device.set_attribute(DeviceAttributes.mode.value, 2)
+            mode_message = mock_build_send.call_args[0][0]
+            assert mode_message.power is True
+            assert mode_message.mode == 2
+            # Cache reflects the commanded state before the device responds.
+            assert self.device.attributes[DeviceAttributes.power] is True
+            assert self.device.attributes[DeviceAttributes.mode] == 2
+
+            # 2. immediately set target temperature (mode=None, as the climate
+            #    entity does) - must not resurrect the stale power=False.
+            self.device.set_target_temperature(21, None)
+            temp_message = mock_build_send.call_args[0][0]
+            assert temp_message.power is True
+            assert temp_message.mode == 2
+            assert temp_message.target_temperature == 21
+
     def test_customize_temperature_limits(self) -> None:
         """Test customize min/max temperature limits."""
         self.device.set_customize('{"min_temperature": 17, "max_temperature": 28}')
         assert self.device.attributes[DeviceAttributes.min_temperature] == 17
         assert self.device.attributes[DeviceAttributes.max_temperature] == 28
 
+    def test_capability_temperature_limits_missing_range(self) -> None:
+        """Test capability limits fall back when the mode range is absent.
+
+        The nested ``temperature`` map may lack the entry for the current mode
+        (e.g. a malformed B5 payload). The resolver must return None instead of
+        raising, so the consumer keeps its own default range.
+        """
+        self.device._attributes[DeviceAttributes.mode] = 2  # -> "cool"
+        # temperature dict is present but has no "cool" key.
+        self.device._capabilities["temperature"] = {"heat": {"min": 16, "max": 30}}
+        assert self.device._capability_temperature_limits() is None
+
+    def test_capability_temperature_limits_missing_min_max(self) -> None:
+        """Test capability limits return None when min/max keys are missing.
+
+        A range entry that is a dict but lacks the ``min``/``max`` keys must not
+        raise a KeyError; the resolver returns None instead.
+        """
+        self.device._attributes[DeviceAttributes.mode] = 2  # -> "cool"
+        self.device._capabilities["temperature"] = {"cool": {"min": 16}}
+        assert self.device._capability_temperature_limits() is None
+
     def test_build_query(self) -> None:
         """Test build query."""
         self.device._used_subprotocol = True
         queries = self.device.build_query()
         assert len(queries) == 3
-        assert isinstance(queries[0], MessageSubProtocolQuery)
-        assert isinstance(queries[1], MessageSubProtocolQuery)
-        assert isinstance(queries[2], MessageSubProtocolQuery)
+        assert isinstance(queries[0], SubProtocolQuery)
+        assert isinstance(queries[1], SubProtocolQuery)
+        assert isinstance(queries[2], SubProtocolQuery)
 
         self.device._used_subprotocol = False
         queries = self.device.build_query()
-        assert len(queries) == 11
-        assert isinstance(queries[0], MessageQuery)
-        assert isinstance(queries[1], MessageNewProtocolQuery)
-        assert isinstance(queries[2], MessageNewProtocolSelfCleanQuery)
-        assert isinstance(queries[3], MessagePowerQuery)
-        assert isinstance(queries[4], MessageHumidityQuery)
-        assert isinstance(queries[5], MessageGroupZeroQuery)
-        assert isinstance(queries[6], MessageGroupOneQuery)
-        assert isinstance(queries[7], MessageGroupTwoQuery)
-        assert isinstance(queries[8], MessageGroupSevenQuery)
-        assert isinstance(queries[9], MessageCapabilitiesQuery)
-        assert isinstance(queries[10], MessageCapabilitiesAdditionalQuery)
+        # The new-protocol query and self-clean query are now a single merged
+        # PropertiesQuery. Capability queries are no longer part of the
+        # recurring status cycle; they are returned by build_init_query().
+        assert len(queries) == 8
+        assert isinstance(queries[0], StateQuery)
+        assert isinstance(queries[1], PropertiesQuery)
+        assert isinstance(queries[2], PowerQuery)
+        assert isinstance(queries[3], HumidityQuery)
+        assert isinstance(queries[4], GroupZeroQuery)
+        assert isinstance(queries[5], GroupOneQuery)
+        assert isinstance(queries[6], GroupTwoQuery)
+        assert isinstance(queries[7], GroupSevenQuery)
+        assert not any(
+            isinstance(q, CapabilitiesQuery | CapabilitiesAdditionalQuery)
+            for q in queries
+        )
 
-    def test_build_query_omits_rate_select_until_capability_confirmed(self) -> None:
-        """Test rate_select stays out of the B1 query until b5_electricity confirms it.
+    def test_build_init_query_capability_lifecycle(self) -> None:
+        """Test build_init_query arms/clears the one-shot B5 capability probes."""
+        self.device._used_subprotocol = False
+        # Basic query is armed at construction; additional is not yet.
+        assert self.device._capability_query is True
+        assert self.device._capability_addition_query is False
+        init = self.device.build_init_query()
+        assert len(init) == 1
+        assert isinstance(init[0], CapabilitiesQuery)
+        assert not isinstance(init[0], CapabilitiesAdditionalQuery)
+
+        # After the basic reply advertises a second frame, only the additional
+        # query is due.
+        self.device._capability_query = False
+        self.device._capability_addition_query = True
+        init = self.device.build_init_query()
+        assert len(init) == 1
+        assert isinstance(init[0], CapabilitiesAdditionalQuery)
+
+        # Once both are resolved, no capability query is sent.
+        self.device._capability_addition_query = False
+        assert self.device.build_init_query() == []
+
+        # Subprotocol (BB) devices never use B5 capability probes.
+        self.device._used_subprotocol = True
+        self.device._capability_query = True
+        self.device._capability_addition_query = True
+        assert self.device.build_init_query() == []
+
+    def test_build_query_omits_optional_tags_until_capability_confirmed(self) -> None:
+        """Test optional tags stay out of the B1 query until capabilities confirm them.
 
         Before any B5 capabilities response is seen, `_capabilities` is empty, so
-        the query built for the device must not ask for rate_select.
+        the query built for the device must not ask for rate_select or self_clean.
         """
         self.device._used_subprotocol = False
         assert self.device.capabilities == {}
         queries = self.device.build_query()
-        new_protocol_query = next(
-            q for q in queries if isinstance(q, MessageNewProtocolQuery)
-        )
-        assert NewProtocolTags.rate_select not in new_protocol_query._body
+        new_protocol_query = next(q for q in queries if isinstance(q, PropertiesQuery))
+        assert CapabilityTag.rate_select not in new_protocol_query._body
+        assert CapabilityTag.self_clean not in new_protocol_query._body
 
         self.device._capabilities["rate_select"] = True
+        self.device._capabilities["self_clean"] = True
         queries = self.device.build_query()
-        new_protocol_query = next(
-            q for q in queries if isinstance(q, MessageNewProtocolQuery)
+        new_protocol_query = next(q for q in queries if isinstance(q, PropertiesQuery))
+        assert CapabilityTag.rate_select in new_protocol_query._body
+        assert CapabilityTag.self_clean in new_protocol_query._body
+
+    def test_customize_capabilities_override_query_and_property(self) -> None:
+        """Test a customize capabilities entry forces an optional tag on.
+
+        A user can enable a feature the B5 query never advertised; the merged
+        capabilities property and the B1 query both reflect the override.
+        """
+        self.device._used_subprotocol = False
+        self.device.set_customize('{"capabilities": {"self_clean": true}}')
+        assert self.device.capabilities["self_clean"] is True
+        queries = self.device.build_query()
+        new_protocol_query = next(q for q in queries if isinstance(q, PropertiesQuery))
+        assert CapabilityTag.self_clean in new_protocol_query._body
+
+    def test_customize_capabilities_disable_overrides_reported_value(self) -> None:
+        """Test a customize false value overrides a B5-reported capability."""
+        self.device._used_subprotocol = False
+        self.device._capabilities["rate_select"] = 2
+        self.device.set_customize('{"capabilities": {"rate_select": false}}')
+        assert self.device.capabilities["rate_select"] is False
+        queries = self.device.build_query()
+        new_protocol_query = next(q for q in queries if isinstance(q, PropertiesQuery))
+        assert CapabilityTag.rate_select not in new_protocol_query._body
+
+    def test_customize_capabilities_reset_when_absent(self) -> None:
+        """Test customize capabilities clear when a later customize omits them."""
+        self.device.set_customize('{"capabilities": {"self_clean": true}}')
+        assert self.device._customize_capabilities == {"self_clean": True}
+        self.device.set_customize('{"temperature_step": 1}')
+        assert self.device._customize_capabilities == {}
+
+    def test_customize_capabilities_ignores_non_dict(self) -> None:
+        """Test a non-dict capabilities value is ignored, not applied."""
+        self.device.set_customize('{"capabilities": "self_clean"}')
+        assert self.device._customize_capabilities == {}
+
+    def test_customize_capabilities_override_priority(self) -> None:
+        """Test customize override wins when both B5 and customize set the same key.
+
+        When _capabilities and _customize_capabilities both have a key, the
+        merged capabilities property must return the customize value (higher
+        priority), ensuring users can correct wrong B5 reports.
+        """
+        self.device._capabilities["rate_select"] = 1
+        self.device._capabilities["self_clean"] = False
+        self.device.set_customize(
+            '{"capabilities": {"rate_select": 2, "self_clean": true}}',
         )
-        assert NewProtocolTags.rate_select in new_protocol_query._body
+        merged = self.device.capabilities
+        assert merged["rate_select"] == 2  # customize wins over B5 value 1
+        assert merged["self_clean"] is True  # customize wins over B5 value False
+
+    def test_customize_capabilities_publishes_event_on_enable(self) -> None:
+        """Test set_customize emits a capabilities event when enabling an override.
+
+        When set_customize applies a capability override, it must notify listeners
+        (e.g., Home Assistant) via update_all so they see the merged capabilities
+        immediately, not after the next B5 query (which is one-shot).
+        """
+        with patch.object(self.device, "update_all") as update_all_mock:
+            self.device.set_customize('{"capabilities": {"self_clean": true}}')
+            # Verify update_all was called with the merged capabilities dict
+            calls = [call.args[0] for call in update_all_mock.call_args_list]
+            # Should have at least one call with capabilities key
+            capabilities_updates = [c for c in calls if "capabilities" in c]
+            assert len(capabilities_updates) > 0
+            # The published capabilities should include the override
+            published_caps = capabilities_updates[-1]["capabilities"]
+            assert published_caps["self_clean"] is True
+
+    def test_customize_capabilities_publishes_event_on_clear(self) -> None:
+        """Test set_customize emits a capabilities event when clearing overrides.
+
+        When set_customize is called with no capabilities key (or empty customize),
+        it resets _customize_capabilities to {}. This must still publish the merged
+        capabilities so listeners know the overrides are gone and the effective map
+        has reverted to B5-only values.
+        """
+        # First set an override
+        self.device.set_customize('{"capabilities": {"rate_select": 3}}')
+        assert self.device._customize_capabilities == {"rate_select": 3}
+        # Now clear it by calling set_customize with no capabilities key
+        with patch.object(self.device, "update_all") as update_all_mock:
+            self.device.set_customize('{"temperature_step": 1}')
+            # Verify update_all was called with capabilities
+            calls = [call.args[0] for call in update_all_mock.call_args_list]
+            capabilities_updates = [c for c in calls if "capabilities" in c]
+            assert len(capabilities_updates) > 0
+            # The published capabilities should not have rate_select override
+            published_caps = capabilities_updates[-1]["capabilities"]
+            assert "rate_select" not in published_caps or not published_caps.get(
+                "rate_select",
+            )
 
     def test_bb_model_builds_distinct_queries_and_attributes(self) -> None:
         """Test verified BB model starts with independent BB queries."""
@@ -322,9 +511,9 @@ class TestMideaACDevice:
         queries = device.build_query()
 
         assert [type(query) for query in queries] == [
-            MessageSubProtocolQuery10,
-            MessageSubProtocolQuery11,
-            MessageSubProtocolQuery30,
+            SubProtocolQuery10,
+            SubProtocolQuery11,
+            SubProtocolQuery30,
         ]
         assert DeviceAttributes.compressor_frequency in device.attributes
         assert DeviceAttributes.target_compressor_frequency in device.attributes
@@ -353,13 +542,11 @@ class TestMideaACDevice:
 
         assert DeviceAttributes.fresh_air_exhaust_power not in device.attributes
         queries = device.build_query()
-        assert isinstance(queries[0], MessageQuery)
+        assert isinstance(queries[0], StateQuery)
         assert not any(
             isinstance(
                 query,
-                MessageSubProtocolQuery10
-                | MessageSubProtocolQuery11
-                | MessageSubProtocolQuery30,
+                SubProtocolQuery10 | SubProtocolQuery11 | SubProtocolQuery30,
             )
             for query in queries
         )
@@ -426,14 +613,14 @@ class TestMideaACDevice:
         with patch.object(device, "build_send") as build_send:
             device.set_attribute(DeviceAttributes.fresh_air_mode, "medium")
             intake = build_send.call_args.args[0]
-            assert isinstance(intake, MessageSubProtocolFreshAirSet)
+            assert isinstance(intake, SubProtocolFreshAirSet)
             assert intake.power is True
             assert intake.speed == 60
             assert intake.exhaust is False
 
             device.set_attribute(DeviceAttributes.fresh_air_exhaust_mode, "high")
             exhaust = build_send.call_args.args[0]
-            assert isinstance(exhaust, MessageSubProtocolFreshAirSet)
+            assert isinstance(exhaust, SubProtocolFreshAirSet)
             assert exhaust.power is True
             assert exhaust.speed == 80
             assert exhaust.exhaust is True
@@ -451,7 +638,7 @@ class TestMideaACDevice:
             device.set_attribute(DeviceAttributes.fresh_air_exhaust_power, True)
 
         message = build_send.call_args.args[0]
-        assert isinstance(message, MessageSubProtocolFreshAirSet)
+        assert isinstance(message, SubProtocolFreshAirSet)
         assert message.power is True
         assert message.speed == 80
         assert message.exhaust is True
@@ -462,14 +649,14 @@ class TestMideaACDevice:
         with patch.object(device, "build_send") as build_send:
             device.set_attribute(DeviceAttributes.fresh_air_fan_speed, 55)
             intake = build_send.call_args.args[0]
-            assert isinstance(intake, MessageSubProtocolFreshAirSet)
+            assert isinstance(intake, SubProtocolFreshAirSet)
             assert intake.power is True
             assert intake.speed == 55
             assert intake.exhaust is False
 
             device.set_attribute(DeviceAttributes.fresh_air_exhaust_speed, 30)
             exhaust = build_send.call_args.args[0]
-            assert isinstance(exhaust, MessageSubProtocolFreshAirSet)
+            assert isinstance(exhaust, SubProtocolFreshAirSet)
             assert exhaust.power is True
             assert exhaust.speed == 30
             assert exhaust.exhaust is True
@@ -505,7 +692,50 @@ class TestMideaACDevice:
             "down-mid",
             "down",
         ]
+        # No rate_select capability reported yet: no options offered
+        assert self.device.rate_selects == []
+
+        # 2-level device (b5_electricity value 1) reports 50/75/100 gears
+        self.device._capabilities["rate_select"] = 1
+        assert self.device.rate_selects == ["50", "75", "100"]
+
+        # 5-level device (b5_electricity value 2 or 3) reports the full ladder
+        self.device._capabilities["rate_select"] = 2
         assert self.device.rate_selects == ["1", "20", "40", "60", "80", "100"]
+        self.device._capabilities["rate_select"] = 3
+        assert self.device.rate_selects == ["1", "20", "40", "60", "80", "100"]
+
+    def test_process_message_decodes_rate_select_per_level(self) -> None:
+        """Test an incoming rate_select value decodes via the reported gear map.
+
+        Regression for the "stays unknown" symptom: the raw value must be
+        mapped through the level-specific gear map instead of a fixed table.
+        """
+        with patch("midealan.devices.ac.MessageACResponse") as mock_message_response:
+            mock_message = mock_message_response.return_value
+            mock_message.used_subprotocol = False
+            mock_message.fresh_air_power = False
+            mock_message.rate_select = 75
+
+            # 2-level device: raw 75 -> gear "75" (the value from issue #980)
+            self.device._capabilities["rate_select"] = 1
+            result = self.device.process_message(b"")
+            assert result[DeviceAttributes.rate_select.value] == "75"
+
+            # 5-level device: 75 is not a valid gear, so it decodes to None
+            self.device._capabilities["rate_select"] = 2
+            result = self.device.process_message(b"")
+            assert result[DeviceAttributes.rate_select.value] is None
+
+            # 5-level device: raw 40 -> gear "40"
+            mock_message.rate_select = 40
+            result = self.device.process_message(b"")
+            assert result[DeviceAttributes.rate_select.value] == "40"
+
+            # No capability reported: no gear map, decodes to None
+            self.device._capabilities["rate_select"] = 0
+            result = self.device.process_message(b"")
+            assert result[DeviceAttributes.rate_select.value] is None
 
     def test_capabilities_property_updates_from_b5_response(self) -> None:
         """Test B5 capability flags accumulate into the capabilities property."""
@@ -518,13 +748,133 @@ class TestMideaACDevice:
         self.device.process_message(self._response(body))
 
         assert self.device.capabilities == {
-            "heat_mode": True,
-            "cool_mode": True,
-            "dry_mode": False,
-            "auto_mode": True,
+            "modes": ["heat", "cool", "auto"],
             "eco": True,
             "anion": True,
         }
+
+    def test_b5_response_publishes_capabilities_in_status(self) -> None:
+        """Test the merged capabilities dict is pushed through update_all.
+
+        The HA integration reads ``device.capabilities`` on each status update,
+        so process_message must surface the decoded dict rather than only
+        caching it internally.
+        """
+        body = bytearray([0xB5, 0x02])
+        body += bytearray([0x14, 0x02, 0x01, 7])  # b5_mode
+        body += bytearray([0x12, 0x02, 0x01, 1])  # b5_eco
+
+        # process_message's return value is what parse_message forwards verbatim
+        # to update_all(), so the dict here is what listeners receive.
+        status = self.device.process_message(self._response(body))
+
+        assert "capabilities" in status
+        assert "heat" in status["capabilities"]["modes"]
+        assert status["capabilities"] == self.device.capabilities
+        # It is a copy, not the internal dict, so listeners cannot corrupt it.
+        assert status["capabilities"] is not self.device.capabilities
+
+    def test_non_b5_response_omits_capabilities_from_status(self) -> None:
+        """Test non-capability responses do not carry a capabilities key."""
+        # A plain C0 state body has no capabilities.
+        body = bytearray([0xC0]) + bytearray(20)
+        status = self.device.process_message(self._response(body))
+
+        assert "capabilities" not in status
+
+    def test_reset_init_query_re_arms_capability_probes(self) -> None:
+        """Test close_socket re-arms the B5 probes like the appliance query.
+
+        A reconnected device must re-probe capabilities from scratch instead of
+        reusing the previous result.
+        """
+        basic = bytearray.fromhex(
+            "aa3dac00000000000803b50a1202010114020101150201001e020101170201021a"
+            "02010110020101250207203c203c203c00240201014800010101199831",
+        )
+        additional = bytearray.fromhex(
+            "aa2fac00000000000803b5081f0201002c020101160201043900010151000101e3"
+            "00010113020101cd000103001a6910",
+        )
+        self.device.process_message(bytes(basic))
+        self.device.process_message(bytes(additional))
+        # Snapshot into locals: mypy narrows an asserted attribute to a literal
+        # and can't see the opaque reset_init_query() below flips it back, so a
+        # direct `is True`/`is False` pair would be reported unreachable.
+        probed = (
+            self.device._capability_query,
+            self.device._support_capability,
+            self.device._support_capability_addition,
+        )
+        assert probed == (False, True, True)
+
+        # A socket close re-arms the basic probe (additional stays disarmed until
+        # a fresh basic frame advertises it again).
+        self.device.reset_init_query()
+        rearmed = (
+            self.device._capability_query,
+            self.device._capability_addition_query,
+            self.device._support_capability,
+            self.device._support_capability_addition,
+        )
+        assert rearmed == (True, False, False, False)
+        assert [type(q) for q in self.device.build_init_query()] == [CapabilitiesQuery]
+
+    def test_capability_query_lifecycle_stops_after_both_frames(self) -> None:
+        """Test the two B5 probes run once then stop, merging both frames.
+
+        The basic frame advertises a second frame, which arms the additional
+        query; once the additional frame is parsed, both flags are cleared so no
+        capability query is ever sent again.
+        """
+        basic = bytearray.fromhex(
+            "aa3dac00000000000803b50a1202010114020101150201001e020101170201021a"
+            "02010110020101250207203c203c203c00240201014800010101199831",
+        )
+        additional = bytearray.fromhex(
+            "aa2fac00000000000803b5081f0201002c020101160201043900010151000101e3"
+            "00010113020101cd000103001a6910",
+        )
+
+        # Initial state: only the basic probe is armed. Snapshot into a local so
+        # mypy's warn_unreachable does not treat the later contradicting asserts
+        # (after the opaque process_message calls) as unreachable.
+        initial = (
+            self.device._capability_query,
+            self.device._capability_addition_query,
+            self.device._support_capability,
+            self.device._support_capability_addition,
+        )
+        assert initial == (True, False, False, False)
+        assert [type(q) for q in self.device.build_init_query()] == [CapabilitiesQuery]
+
+        # Basic frame: records support, clears the basic probe, arms additional.
+        self.device.process_message(bytes(basic))
+        after_basic = (
+            self.device._support_capability,
+            self.device._capability_query,
+            self.device._capability_addition_query,
+        )
+        assert after_basic == (True, False, True)
+        assert [type(q) for q in self.device.build_init_query()] == [
+            CapabilitiesAdditionalQuery,
+        ]
+
+        # Additional frame: records support and clears the additional probe.
+        self.device.process_message(bytes(additional))
+        after_additional = (
+            self.device._support_capability_addition,
+            self.device._capability_addition_query,
+        )
+        assert after_additional == (True, False)
+        assert self.device.build_init_query() == []
+
+        # Both frames merged into a single capability dict. rate_select carries
+        # the raw B5 b5_electricity level count (4 in this frame), not a bool.
+        assert self.device.capabilities["rate_select"] == 4
+        modes = self.device.capabilities["modes"]
+        assert isinstance(modes, list)
+        assert "cool" in modes
 
     def test_process_message(self) -> None:
         """Test process message."""
@@ -802,6 +1152,13 @@ class TestMideaACDevice:
             self.device.set_swing(True, False)
             mock_build_send.assert_called()
 
+    def test_set_swing_subprotocol(self) -> None:
+        """Test set swing with subprotocol device."""
+        self.device._used_subprotocol = True
+        with patch.object(self.device, "send_message_v2") as mock_build_send:
+            self.device.set_swing(True, False)
+            mock_build_send.assert_called()
+
     def test_self_clean_syncs_from_self_clean_active(self) -> None:
         """Test that self_clean attribute tracks self_clean_active status reports."""
         with patch("midealan.devices.ac.MessageACResponse") as mock_message_response:
@@ -957,6 +1314,503 @@ class TestMideaACDevice:
         assert updates == []
         assert self.device._pending_self_clean is None
 
+    def test_ieco_in_initial_attributes(self) -> None:
+        """Test iECO defaults to off and gear 1."""
+        assert self.device.attributes[DeviceAttributes.ieco] is False
+        assert self.device._ieco_number == 1
+
+    def test_set_ieco_echoes_reported_number(self) -> None:
+        """Test setting iECO builds a PropertiesSet echoing the last gear."""
+        self.device._ieco_number = 3
+        with patch.object(self.device, "build_send") as mock_build_send:
+            self.device.set_attribute(DeviceAttributes.ieco.value, True)
+
+        message = mock_build_send.call_args[0][0]
+        assert message.ieco is True
+        assert message.ieco_number == 3
+
+    def test_set_ieco_off(self) -> None:
+        """Test turning iECO off builds a PropertiesSet with ieco False."""
+        with patch.object(self.device, "build_send") as mock_build_send:
+            self.device.set_attribute(DeviceAttributes.ieco.value, False)
+
+        message = mock_build_send.call_args[0][0]
+        assert message.ieco is False
+
+    def test_process_message_captures_ieco_state_and_number(self) -> None:
+        """Test process_message publishes iECO state and records its gear."""
+        with patch("midealan.devices.ac.MessageACResponse") as mock_message_response:
+            mock_message = mock_message_response.return_value
+            mock_message.used_subprotocol = False
+            mock_message.fresh_air_power = False
+            mock_message.ieco = True
+            mock_message.ieco_number = 5
+
+            result = self.device.process_message(b"")
+
+        assert result[DeviceAttributes.ieco.value] is True
+        assert self.device._ieco_number == 5
+
     def test_invalid_customize_format(self) -> None:
         """Test invalid customize format."""
         self.device.set_customize("{")
+
+    def test_customize_capabilities_legacy_dict_format(self) -> None:
+        """Test customize with legacy dict format converts to array format."""
+        customize_str = """{
+            "capabilities": {
+                "modes": {"heat": true, "cool": true, "dry": false, "auto": true},
+                "fan_speeds": {
+                    "silent": false, "low": true, "medium": true, "high": true
+                },
+                "swing_modes": {"vertical": true, "horizontal": false, "both": true}
+            }
+        }"""
+        self.device.set_customize(customize_str)
+
+        # Legacy dict format should be converted to array format
+        assert self.device.capabilities["modes"] == ["heat", "cool", "auto"]
+        assert self.device.capabilities["fan_speeds"] == ["low", "medium", "high"]
+        assert self.device.capabilities["swing_modes"] == ["vertical", "both"]
+
+    def test_customize_capabilities_array_format(self) -> None:
+        """Test customize with array format works directly."""
+        customize_str = """{
+            "capabilities": {
+                "modes": ["heat", "cool"],
+                "fan_speeds": ["low", "high", "auto"],
+                "swing_modes": ["vertical"]
+            }
+        }"""
+        self.device.set_customize(customize_str)
+
+        # Array format should be used as-is
+        assert self.device.capabilities["modes"] == ["heat", "cool"]
+        assert self.device.capabilities["fan_speeds"] == ["low", "high", "auto"]
+        assert self.device.capabilities["swing_modes"] == ["vertical"]
+
+    def test_customize_capabilities_invalid_format_skipped(self) -> None:
+        """Test customize with invalid format is skipped with warning."""
+        customize_str = """{
+            "capabilities": {
+                "modes": "invalid_string_not_dict_or_list",
+                "fan_speeds": 123,
+                "other_capability": true
+            }
+        }"""
+        self.device.set_customize(customize_str)
+
+        # Invalid formats should be skipped and not set
+        assert "modes" not in self.device._customize_capabilities
+        assert "fan_speeds" not in self.device._customize_capabilities
+        # Other valid capabilities should still be set
+        assert self.device._customize_capabilities.get("other_capability") is True
+
+    def test_customize_capabilities_mixed_valid_invalid(self) -> None:
+        """Test customize with mix of valid and invalid capability formats."""
+        customize_str = """{
+            "capabilities": {
+                "modes": ["heat", "cool"],
+                "fan_speeds": "invalid",
+                "other_capability": true
+            }
+        }"""
+        self.device.set_customize(customize_str)
+
+        # Valid formats should be applied
+        assert self.device.capabilities["modes"] == ["heat", "cool"]
+        # Other capabilities should remain as-is
+        assert self.device.capabilities["other_capability"] is True
+
+    def test_customize_capabilities_array_with_non_string_elements(self) -> None:
+        """Test customize rejects arrays containing non-string elements."""
+        customize_str = """{
+            "capabilities": {
+                "modes": ["heat", 123, "cool"],
+                "fan_speeds": [1, 2, 3],
+                "other_capability": true
+            }
+        }"""
+        self.device.set_customize(customize_str)
+
+        # Arrays with non-string elements should be rejected and not set
+        assert "modes" not in self.device._customize_capabilities
+        assert "fan_speeds" not in self.device._customize_capabilities
+        # Other valid capabilities should still be set
+        assert self.device._customize_capabilities.get("other_capability") is True
+
+
+class TestHASupportProperties:
+    """Test Home Assistant integration support properties."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_device(self) -> None:
+        """Set up test device."""
+        self.device = MideaACDevice(
+            name="Test AC",
+            device_id=123456789012345,
+            ip_address="192.168.1.100",
+            port=6444,
+            token="AA" * 40,
+            key="BB" * 16,
+            device_protocol=ProtocolVersion.V3,
+            model="test_model",
+            subtype=0,
+            customize="",
+        )
+
+    def test_supported_hvac_modes_all_modes(self) -> None:
+        """Test supported_hvac_modes with all modes available."""
+        self.device._capabilities = {
+            "modes": ["auto", "cool", "heat", "dry"],
+        }
+        expected = ["off", "auto", "cool", "heat", "dry"]
+        assert self.device.supported_hvac_modes == expected
+
+    def test_supported_hvac_modes_partial_modes(self) -> None:
+        """Test supported_hvac_modes with only some modes available."""
+        self.device._capabilities = {
+            "modes": ["cool", "heat"],
+        }
+        expected = ["off", "cool", "heat"]
+        assert self.device.supported_hvac_modes == expected
+
+    def test_supported_hvac_modes_no_cool(self) -> None:
+        """Test supported_hvac_modes for heat-only device."""
+        self.device._capabilities = {
+            "modes": ["heat", "auto"],
+        }
+        expected = ["off", "auto", "heat"]
+        assert self.device.supported_hvac_modes == expected
+
+    def test_supported_hvac_modes_with_fan_only(self) -> None:
+        """Test supported_hvac_modes includes fan_only when enabled in customize."""
+        self.device._capabilities = {
+            "modes": ["cool", "heat"],
+        }
+        self.device._customize_capabilities = {
+            "fan_only": True,
+        }
+        expected = ["off", "cool", "heat", "fan_only"]
+        assert self.device.supported_hvac_modes == expected
+
+    def test_supported_hvac_modes_empty_capabilities(self) -> None:
+        """Test supported_hvac_modes with empty capabilities.
+
+        Returns default full set.
+        """
+        self.device._capabilities = {}
+        expected = ["off", "auto", "cool", "heat", "dry"]
+        assert self.device.supported_hvac_modes == expected
+
+    def test_supported_hvac_modes_customize_override(self) -> None:
+        """Test supported_hvac_modes respects customize overrides."""
+        self.device._capabilities = {
+            "modes": ["auto", "cool", "heat", "dry"],
+        }
+        self.device._customize_capabilities = {
+            "modes": ["cool", "heat"],
+        }
+        # customize overrides B5 capabilities
+        expected = ["off", "cool", "heat"]
+        assert self.device.supported_hvac_modes == expected
+
+    def test_supported_fan_modes_all_speeds(self) -> None:
+        """Test supported_fan_modes with all speeds available."""
+        self.device._capabilities = {
+            "fan_speeds": ["auto", "silent", "low", "medium", "high", "custom"],
+        }
+        expected = ["auto", "silent", "low", "medium", "high", "custom"]
+        assert self.device.supported_fan_modes == expected
+
+    def test_supported_fan_modes_partial_speeds(self) -> None:
+        """Test supported_fan_modes with only some speeds available."""
+        self.device._capabilities = {
+            "fan_speeds": ["auto", "low", "high"],
+        }
+        expected = ["auto", "low", "high"]
+        assert self.device.supported_fan_modes == expected
+
+    def test_supported_fan_modes_no_silent(self) -> None:
+        """Test supported_fan_modes without silent speed."""
+        self.device._capabilities = {
+            "fan_speeds": ["auto", "low", "medium", "high"],
+        }
+        expected = ["auto", "low", "medium", "high"]
+        assert self.device.supported_fan_modes == expected
+
+    def test_supported_fan_modes_empty_capabilities(self) -> None:
+        """Test supported_fan_modes with empty capabilities.
+
+        Returns default full set.
+        """
+        self.device._capabilities = {}
+        expected: list[str] = ["auto", "silent", "low", "medium", "high", "custom"]
+        assert self.device.supported_fan_modes == expected
+
+    def test_supported_fan_modes_customize_override(self) -> None:
+        """Test supported_fan_modes respects customize overrides."""
+        self.device._capabilities = {
+            "fan_speeds": ["auto", "silent", "low", "medium", "high"],
+        }
+        self.device._customize_capabilities = {
+            "fan_speeds": ["auto", "low", "high"],
+        }
+        # customize overrides B5 capabilities
+        expected = ["auto", "low", "high"]
+        assert self.device.supported_fan_modes == expected
+
+    def test_supported_fan_modes_custom_returns_full_set(self) -> None:
+        """Test supported_fan_modes returns full set when custom is present."""
+        self.device._capabilities = {
+            "fan_speeds": ["auto", "custom"],
+        }
+        # custom in list means return full set
+        expected = ["auto", "silent", "low", "medium", "high", "custom"]
+        assert self.device.supported_fan_modes == expected
+
+    def test_supported_fan_modes_custom_in_customize(self) -> None:
+        """Test supported_fan_modes with custom in customize returns only custom."""
+        self.device._customize_capabilities = {
+            "fan_speeds": ["custom"],
+        }
+        # custom in customize is explicit user config, only return what's specified
+        expected = ["custom"]
+        assert self.device.supported_fan_modes == expected
+
+    def test_supported_swing_modes_both_directions(self) -> None:
+        """Test supported_swing_modes with both directions available."""
+        self.device._capabilities = {
+            "swing_modes": ["vertical", "horizontal"],
+        }
+        expected = ["off", "vertical", "horizontal", "both"]
+        assert self.device.supported_swing_modes == expected
+
+    def test_supported_swing_modes_vertical_only(self) -> None:
+        """Test supported_swing_modes with only vertical available."""
+        self.device._capabilities = {
+            "swing_modes": ["vertical"],
+        }
+        expected = ["off", "vertical"]
+        assert self.device.supported_swing_modes == expected
+
+    def test_supported_swing_modes_horizontal_only(self) -> None:
+        """Test supported_swing_modes with only horizontal available."""
+        self.device._capabilities = {
+            "swing_modes": ["horizontal"],
+        }
+        expected = ["off", "horizontal"]
+        assert self.device.supported_swing_modes == expected
+
+    def test_supported_swing_modes_none(self) -> None:
+        """Test supported_swing_modes with no swing support.
+
+        Returns default full set.
+        """
+        self.device._capabilities = {}
+        expected = ["off", "vertical", "horizontal", "both"]
+        assert self.device.supported_swing_modes == expected
+
+    def test_supported_swing_modes_customize_override(self) -> None:
+        """Test supported_swing_modes respects customize overrides."""
+        self.device._capabilities = {
+            "swing_modes": ["vertical", "horizontal"],
+        }
+        self.device._customize_capabilities = {
+            "swing_modes": ["vertical"],
+        }
+        # customize overrides B5 capabilities
+        expected = ["off", "vertical"]
+        assert self.device.supported_swing_modes == expected
+
+    def test_supported_preset_modes_all_features(self) -> None:
+        """Test supported_preset_modes with all features available."""
+        self.device._capabilities = {
+            "modes": ["auto", "cool", "heat"],  # B5 indicator
+            "eco_mode": True,
+            "turbo_cool": True,
+            "turbo_heat": True,
+            "sleep_mode": True,
+            "comfort_mode": True,
+        }
+        expected = ["none", "comfort", "eco", "boost", "sleep"]
+        assert self.device.supported_preset_modes == expected
+
+    def test_supported_preset_modes_eco_only(self) -> None:
+        """Test supported_preset_modes with only eco available."""
+        self.device._capabilities = {
+            "modes": ["cool"],  # B5 indicator
+            "eco_mode": True,
+        }
+        # comfort and sleep are always available (no B5 flag)
+        expected = ["none", "comfort", "eco", "sleep"]
+        assert self.device.supported_preset_modes == expected
+
+    def test_supported_preset_modes_ieco(self) -> None:
+        """Test supported_preset_modes with ieco (independent preset)."""
+        self.device._capabilities = {
+            "modes": ["cool"],  # B5 indicator
+            "ieco": True,
+        }
+        # comfort and sleep are always available (no B5 flag)
+        # ieco is a separate preset from eco
+        expected = ["none", "comfort", "sleep", "ieco"]
+        assert self.device.supported_preset_modes == expected
+
+    def test_supported_preset_modes_eco_and_ieco(self) -> None:
+        """Test supported_preset_modes with both eco and ieco modes.
+
+        eco_mode and ieco are independent presets (not the same).
+        """
+        self.device._capabilities = {
+            "modes": ["cool"],  # B5 indicator
+            "eco_mode": True,
+            "ieco": True,
+        }
+        # comfort and sleep are always available (no B5 flag)
+        # eco and ieco are both present as separate presets
+        expected = ["none", "comfort", "eco", "sleep", "ieco"]
+        assert self.device.supported_preset_modes == expected
+
+    def test_supported_preset_modes_turbo_cool_only(self) -> None:
+        """Test supported_preset_modes with only turbo_cool (maps to boost)."""
+        self.device._capabilities = {
+            "modes": ["cool"],  # B5 indicator
+            "turbo_cool": True,
+        }
+        # comfort and sleep are always available (no B5 flag)
+        expected = ["none", "comfort", "boost", "sleep"]
+        assert self.device.supported_preset_modes == expected
+
+    def test_supported_preset_modes_turbo_heat_only(self) -> None:
+        """Test supported_preset_modes with only turbo_heat (maps to boost)."""
+        self.device._capabilities = {
+            "modes": ["heat"],  # B5 indicator
+            "turbo_heat": True,
+        }
+        # comfort and sleep are always available (no B5 flag)
+        expected = ["none", "comfort", "boost", "sleep"]
+        assert self.device.supported_preset_modes == expected
+
+    def test_supported_preset_modes_both_turbo(self) -> None:
+        """Test supported_preset_modes with both turbo modes (single boost preset)."""
+        self.device._capabilities = {
+            "modes": ["cool", "heat"],  # B5 indicator
+            "turbo_cool": True,
+            "turbo_heat": True,
+        }
+        # comfort and sleep are always available (no B5 flag)
+        expected = ["none", "comfort", "boost", "sleep"]
+        assert self.device.supported_preset_modes == expected
+
+    def test_supported_preset_modes_empty_capabilities(self) -> None:
+        """Test supported_preset_modes with empty capabilities.
+
+        Returns default basic set (without B5-only presets).
+        """
+        self.device._capabilities = {}
+        expected = ["none", "comfort", "eco", "boost", "sleep"]
+        assert self.device.supported_preset_modes == expected
+
+    def test_supported_preset_modes_partial_features(self) -> None:
+        """Test supported_preset_modes with some features available."""
+        self.device._capabilities = {
+            "modes": ["cool"],  # B5 indicator
+            "eco_mode": True,
+            "sleep_mode": True,
+        }
+        # comfort and sleep are always available (no B5 flag)
+        expected = ["none", "comfort", "eco", "sleep"]
+        assert self.device.supported_preset_modes == expected
+
+    def test_supported_preset_modes_customize_priority(self) -> None:
+        """Test supported_preset_modes with customize override."""
+        self.device._capabilities = {
+            "modes": ["cool"],
+            "eco_mode": True,
+        }
+        self.device._customize_capabilities = {
+            "eco_mode": False,  # Disable eco via customize
+            "turbo_cool": True,  # Enable boost via customize
+        }
+        # customize overrides B5 capabilities
+        expected = ["none", "comfort", "boost", "sleep"]
+        assert self.device.supported_preset_modes == expected
+
+    def test_supported_preset_modes_customize_with_ieco(self) -> None:
+        """Test supported_preset_modes customize with ieco."""
+        self.device._customize_capabilities = {
+            "ieco": True,
+            "comfort_mode": False,  # Disable comfort
+        }
+        # customize controls all presets
+        expected = ["none", "sleep", "ieco"]
+        assert self.device.supported_preset_modes == expected
+
+    def test_supported_preset_modes_customize_enable_eco(self) -> None:
+        """Test supported_preset_modes customize enables eco."""
+        self.device._customize_capabilities = {
+            "eco_mode": True,  # Enable eco via customize
+            "sleep_mode": True,  # Explicitly enable sleep
+        }
+        # customize with eco and explicit sleep
+        expected = ["none", "comfort", "eco", "sleep"]
+        assert self.device.supported_preset_modes == expected
+
+    def test_supported_preset_modes_customize_disable_sleep(self) -> None:
+        """Test supported_preset_modes customize disables sleep."""
+        self.device._customize_capabilities = {
+            "sleep_mode": False,  # Explicitly disable sleep
+        }
+        # customize with sleep disabled
+        expected = ["none", "comfort"]
+        assert self.device.supported_preset_modes == expected
+
+    def test_supported_hvac_modes_customize_with_fan_only(self) -> None:
+        """Test supported_hvac_modes customize modes with fan_only enabled."""
+        self.device._customize_capabilities = {
+            "modes": ["cool", "heat"],
+            "fan_only": True,
+        }
+        # customize modes + fan_only enabled
+        expected = ["off", "cool", "heat", "fan_only"]
+        assert self.device.supported_hvac_modes == expected
+
+    def test_supported_hvac_modes_default_with_fan_only(self) -> None:
+        """Test supported_hvac_modes default set with fan_only enabled."""
+        self.device._capabilities = {}
+        self.device._customize_capabilities = {
+            "fan_only": True,
+        }
+        # default full set + fan_only (no modes in customize or B5)
+        expected = ["off", "auto", "cool", "heat", "dry", "fan_only"]
+        assert self.device.supported_hvac_modes == expected
+
+    def test_supported_swing_modes_customize_horizontal_only(self) -> None:
+        """Test supported_swing_modes customize with horizontal only."""
+        self.device._customize_capabilities = {
+            "swing_modes": ["horizontal"],
+        }
+        expected = ["off", "horizontal"]
+        assert self.device.supported_swing_modes == expected
+
+    def test_supported_swing_modes_customize_both(self) -> None:
+        """Test supported_swing_modes customize with both directions."""
+        self.device._customize_capabilities = {
+            "swing_modes": ["vertical", "horizontal"],
+        }
+        expected = ["off", "vertical", "horizontal", "both"]
+        assert self.device.supported_swing_modes == expected
+
+    def test_supported_preset_modes_b5_without_modes_key(self) -> None:
+        """Test supported_preset_modes B5 capabilities without modes key.
+
+        Falls through to default basic set.
+        """
+        self.device._capabilities = {
+            "eco_mode": True,  # capabilities present but no "modes" key
+        }
+        # No "modes" key means not a valid B5 preset indicator
+        # falls through to default basic set
+        expected = ["none", "comfort", "eco", "boost", "sleep"]
+        assert self.device.supported_preset_modes == expected

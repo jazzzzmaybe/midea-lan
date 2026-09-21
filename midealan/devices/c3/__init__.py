@@ -68,12 +68,57 @@ class DeviceAttributes(StrEnum):
     outdoor_temperature = "outdoor_temperature"
     temp_tw_in = "temp_tw_in"
     temp_tw_out = "temp_tw_out"
+    comp_run_freq = "comp_run_freq"
+    unit_mode_run = "unit_mode_run"
+    fan_speed = "fan_speed"
+    temp_t1 = "temp_t1"
+    temp_t2 = "temp_t2"
+    temp_t2b = "temp_t2b"
+    temp_t3 = "temp_t3"
+    temp_tp = "temp_tp"
+    temp_th = "temp_th"
+    temp_tf = "temp_tf"
+    pressure_high = "pressure_high"
+    pressure_low = "pressure_low"
+    odu_voltage = "odu_voltage"
+    odu_comp_current = "odu_comp_current"
+    odu_target_fre = "odu_target_fre"
+    exv_current = "exv_current"
+    fg_capacity_need = "fg_capacity_need"
     instant_power0 = "instant_power0"
     silent_mode = "silent_mode"
     silent_level = "silent_level"
     eco_mode = "eco_mode"
     tbh = "tbh"
     error_code = "error_code"
+    ibh1_on = "ibh1_on"
+    ibh2_on = "ibh2_on"
+    load_output_tbh = "load_output_tbh"
+    pump_i_running = "pump_i_running"
+    sv1_open = "sv1_open"
+    sv2_open = "sv2_open"
+    pump_o_running = "pump_o_running"
+    pump_d_running = "pump_d_running"
+    pump_c_running = "pump_c_running"
+    sv3_open = "sv3_open"
+    crankcase_heater_on = "crankcase_heater_on"
+    pump_s_running = "pump_s_running"
+    alarm_on = "alarm_on"
+    run_valve_on = "run_valve_on"
+    aux_heat_on = "aux_heat_on"
+    defrost_valve_on = "defrost_valve_on"
+    fact_req_solar_on = "fact_req_solar_on"
+    fact_req_ther_cool_on = "fact_req_ther_cool_on"
+    cool_run = "cool_run"
+    heat_run = "heat_run"
+    dhw_run = "dhw_run"
+    fact_req_ther_heat_on = "fact_req_ther_heat_on"
+    edge_version_type = "edge_version_type"
+    comp_total_run_time = "comp_total_run_time"
+    hmi_sn_code = "hmi_sn_code"
+    idu_software_version_str = "idu_software_version_str"
+    odu_software_version_str = "odu_software_version_str"
+    error_code_description = "error_code_description"
 
 
 class MideaC3Device(MideaDevice):
@@ -138,8 +183,53 @@ class MideaC3Device(MideaDevice):
                 DeviceAttributes.outdoor_temperature: None,
                 DeviceAttributes.temp_tw_in: None,
                 DeviceAttributes.temp_tw_out: None,
+                DeviceAttributes.comp_run_freq: None,
+                DeviceAttributes.unit_mode_run: None,
+                DeviceAttributes.fan_speed: None,
+                DeviceAttributes.temp_t1: None,
+                DeviceAttributes.temp_t2: None,
+                DeviceAttributes.temp_t2b: None,
+                DeviceAttributes.temp_t3: None,
+                DeviceAttributes.temp_tp: None,
+                DeviceAttributes.temp_th: None,
+                DeviceAttributes.temp_tf: None,
+                DeviceAttributes.pressure_high: None,
+                DeviceAttributes.pressure_low: None,
+                DeviceAttributes.odu_voltage: None,
+                DeviceAttributes.odu_comp_current: None,
+                DeviceAttributes.odu_target_fre: None,
+                DeviceAttributes.exv_current: None,
+                DeviceAttributes.fg_capacity_need: None,
                 DeviceAttributes.instant_power0: None,
                 DeviceAttributes.error_code: 0,
+                DeviceAttributes.ibh1_on: None,
+                DeviceAttributes.ibh2_on: None,
+                DeviceAttributes.load_output_tbh: None,
+                DeviceAttributes.pump_i_running: None,
+                DeviceAttributes.sv1_open: None,
+                DeviceAttributes.sv2_open: None,
+                DeviceAttributes.pump_o_running: None,
+                DeviceAttributes.pump_d_running: None,
+                DeviceAttributes.pump_c_running: None,
+                DeviceAttributes.sv3_open: None,
+                DeviceAttributes.crankcase_heater_on: None,
+                DeviceAttributes.pump_s_running: None,
+                DeviceAttributes.alarm_on: None,
+                DeviceAttributes.run_valve_on: None,
+                DeviceAttributes.aux_heat_on: None,
+                DeviceAttributes.defrost_valve_on: None,
+                DeviceAttributes.fact_req_solar_on: None,
+                DeviceAttributes.fact_req_ther_cool_on: None,
+                DeviceAttributes.cool_run: None,
+                DeviceAttributes.heat_run: None,
+                DeviceAttributes.dhw_run: None,
+                DeviceAttributes.fact_req_ther_heat_on: None,
+                DeviceAttributes.edge_version_type: None,
+                DeviceAttributes.comp_total_run_time: None,
+                DeviceAttributes.hmi_sn_code: None,
+                DeviceAttributes.idu_software_version_str: None,
+                DeviceAttributes.odu_software_version_str: None,
+                DeviceAttributes.error_code_description: "No error",
             },
         )
         self._default_temperature_step: float = 0.5
@@ -221,7 +311,7 @@ class MideaC3Device(MideaDevice):
                         self._attributes[DeviceAttributes.room_temp_min]
                     )
             if self._attributes[DeviceAttributes.zone1_power]:
-                if self._attributes[DeviceAttributes.zone_temp_type][zone]:
+                if self._attributes[DeviceAttributes.zone_temp_type][0]:
                     self._attributes[DeviceAttributes.zone1_water_temp_mode] = True
                     self._attributes[DeviceAttributes.zone1_room_temp_mode] = False
                 else:
@@ -231,7 +321,7 @@ class MideaC3Device(MideaDevice):
                 self._attributes[DeviceAttributes.zone1_water_temp_mode] = False
                 self._attributes[DeviceAttributes.zone1_room_temp_mode] = False
             if self._attributes[DeviceAttributes.zone2_power]:
-                if self._attributes[DeviceAttributes.zone_temp_type][zone]:
+                if self._attributes[DeviceAttributes.zone_temp_type][1]:
                     self._attributes[DeviceAttributes.zone2_water_temp_mode] = True
                     self._attributes[DeviceAttributes.zone2_room_temp_mode] = False
                 else:
@@ -298,8 +388,8 @@ class MideaC3Device(MideaDevice):
             DeviceAttributes.silent_mode.value,
             DeviceAttributes.silent_level.value,
         ]:
-            message = MessageSetSilent(self._message_protocol_version)
             if attr == DeviceAttributes.silent_mode.value and isinstance(value, bool):
+                message = MessageSetSilent(self._message_protocol_version)
                 message.silent_mode = bool(value)
                 message.silent_level = (
                     C3SilentLevel.SILENT
@@ -309,6 +399,7 @@ class MideaC3Device(MideaDevice):
                     else C3SilentLevel[self._attributes[DeviceAttributes.silent_level]]
                 )
             elif attr == DeviceAttributes.silent_level.value and isinstance(value, str):
+                message = MessageSetSilent(self._message_protocol_version)
                 message.silent_level = C3SilentLevel[value]
                 message.silent_mode = value != C3SilentLevel.OFF.name
         if message is not None:
