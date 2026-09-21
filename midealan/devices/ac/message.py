@@ -1346,7 +1346,8 @@ class PropertiesBody(NewProtocolMessageBody):
         ):
             # Live degerming (sterilize) state. Unlike self_clean, a B5 notify
             # body carries the live value as well (verified with state toggles),
-            # so no body-type filter is applied here.
+            # so no body-type filter is applied here. The notify payload's raw
+            # head differs from B0/B1, but this slice keeps index 19 valid.
             self.degerming_active: bool = (
                 params[NEW_PROTOCOL_TEMPERATURE_TAG][NEW_PROTOCOL_DEGERMING_BYTE]
                 & NEW_PROTOCOL_DEGERMING_MASK

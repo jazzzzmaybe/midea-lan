@@ -1105,6 +1105,40 @@ class TestMessageACResponse:
         )
         assert response.degerming_active is False
 
+    def test_b5_degerming_state_on(self) -> None:
+        """Test a B5 notify body reports live degerming state (captured on)."""
+        response = MessageACResponse(
+            bytearray.fromhex(
+                "aa3cac00000000000805b5017e002b001ba5647f7f0000000c000000650058029700f2000000e0"
+                "00000040000000003c00282835051400720500019c",
+            ),
+        )
+        assert response.degerming_active is True
+
+    def test_b5_degerming_state_on_extended_payload(self) -> None:
+        """Test degerming on from a B5 notify of the extended payload variant.
+
+        Model 22019061 (COLMO KFR-50GW/CA3) pushes the live state bit in the
+        notify body as well.
+        """
+        response = MessageACResponse(
+            bytearray.fromhex(
+                "aa3cac00000000000805b5017e0038a11fa5647f7f0033000c00070000000f000000f2000000e0"
+                "00000040000000003c00282835850e00720000000000200008000000000005000145",
+            ),
+        )
+        assert response.degerming_active is True
+
+    def test_b5_degerming_state_off_extended_payload(self) -> None:
+        """Test degerming off from a B5 notify of the extended payload variant."""
+        response = MessageACResponse(
+            bytearray.fromhex(
+                "aa3cac00000000000805b5017e0038a51fa5647f7f0000000c00070000000f009000f0000000e0"
+                "00000040000000003c00282836850e00720300000000200008000000000005000198",
+            ),
+        )
+        assert response.degerming_active is False
+
     def test_b1_degerming_state_on_extended_payload(self) -> None:
         """Test degerming on from the extended 0x7e payload variant.
 
