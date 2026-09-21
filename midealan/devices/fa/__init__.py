@@ -405,10 +405,12 @@ class MideaFADevice(MideaDevice):
                 message.oscillation_mode = "Oscillation"
             else:
                 message.oscillation_angle = 0
+                message.oscillation_mode = "Oscillation"
         elif attr == DeviceAttributes.oscillation_mode:
             if value in {"Off", "", None}:
                 message.oscillate = False
                 message.oscillation_angle = 0
+                message.oscillation_mode = "Oscillation"
             elif value in self._new_oscillation_modes.values():
                 message.oscillation_mode = str(value)
                 message.oscillate = True
@@ -424,12 +426,15 @@ class MideaFADevice(MideaDevice):
             if value in {"Off", "", None}:
                 message.oscillate = False
                 message.oscillation_angle = 0
+                message.oscillation_mode = "Oscillation"
             else:
                 message.oscillate = True
                 message.oscillation_angle = value
+                message.oscillation_mode = "Oscillation"
         elif attr == DeviceAttributes.tilting_angle:
             message.oscillate = True
             message.tilting_angle = value
+            message.oscillation_mode = "Tilting"
         else:
             valid = False
         return message if valid else None

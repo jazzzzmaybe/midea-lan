@@ -221,7 +221,9 @@ class MessageNewSet(MessageFABase):
         if self.humidity is not None and MIN_VALUE <= self.humidity <= MAX_HUMIDITY:
             body[6] = self.humidity
         if self.oscillate is not None:
-            MessageBit.set_bit(body, 7, 7, 0 if self.oscillate else 1)
+            # Protocol v5 uses swing angle 0 to represent "off"; the swing
+            # control itself remains enabled when a swing field is supplied.
+            MessageBit.set_bit(body, 7, 7, 0)
             if self.oscillate and self.oscillation_angle is None:
                 body[NEW_PROTOCOL_SWING_ANGLE_BYTE - 1] = 0xFF
         if self.oscillation_mode is not None:
@@ -233,16 +235,12 @@ class MessageNewSet(MessageFABase):
             angle = _new_angle_to_code(self.oscillation_angle)
             if angle is not None:
                 body[NEW_PROTOCOL_SWING_ANGLE_BYTE - 1] = angle
-                MessageBit.set_bit(body, 7, 7, 0 if angle else 1)
+                MessageBit.set_bit(body, 7, 7, 0)
         if self.tilting_angle is not None:
-            angle = _new_angle_to_code(
-                self.tilting_angle,
-                TILTING_ANGLE_CODES,
-            )
+            angle = _new_angle_to_code(self.tilting_angle)
             if angle is not None:
                 body[NEW_PROTOCOL_TILTING_ANGLE_BYTE - 1] = angle
-                if angle:
-                    MessageBit.set_bit(body, 7, 7, 0)
+                MessageBit.set_bit(body, 7, 7, 0)
         if self.humidify is not None:
             if isinstance(self.humidify, bool):
                 humidify = 3 if self.humidify else 1

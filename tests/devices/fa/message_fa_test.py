@@ -215,10 +215,29 @@ class TestMessageNewSet:
         """Test the v5 oscillation disable command."""
         msg = MessageNewSet(ProtocolVersion.V1, 0)
         msg.oscillate = False
+        msg.oscillation_mode = "Oscillation"
         msg.oscillation_angle = 0
 
-        assert msg._body[7] == 0x80
+        assert msg._body[7] == 0x02
         assert msg._body[50] == 0
+
+    def test_body_horizontal_angle_sets_default_direction(self) -> None:
+        """Test a horizontal angle uses the Lua lr direction."""
+        msg = MessageNewSet(ProtocolVersion.V1, 0)
+        msg.oscillation_mode = "Oscillation"
+        msg.oscillation_angle = 60
+
+        assert msg._body[7] == 0x02
+        assert msg._body[50] == 12
+
+    def test_body_vertical_angle_sets_default_direction(self) -> None:
+        """Test a vertical angle uses the Lua ud direction."""
+        msg = MessageNewSet(ProtocolVersion.V1, 0)
+        msg.oscillation_mode = "Tilting"
+        msg.tilting_angle = 60
+
+        assert msg._body[7] == 0x04
+        assert msg._body[24] == 12
 
 
 class TestFAGeneralMessageBody:

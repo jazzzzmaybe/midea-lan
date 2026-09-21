@@ -261,6 +261,39 @@ class TestMideaFADevice:
         assert isinstance(message, MessageNewSet)
         assert message.oscillate is False
         assert message.oscillation_angle == 0
+        assert message.oscillation_mode == "Oscillation"
+        assert message._body[7] == 0x02
+        assert message._body[50] == 0
+
+    def test_protocol_v5_angle_commands_set_direction(self) -> None:
+        """Test v5 angle commands include their Lua default direction."""
+        body = bytearray(52)
+        body[23] = 5
+        body[51] = 0
+        self.device.process_message(
+            _build_message(ProtocolVersion.V1, MessageType.query, body),
+        )
+
+        with patch.object(self.device, "build_send") as mock_build_send:
+            self.device.set_attribute(
+                DeviceAttributes.oscillation_angle.value,
+                "60",
+            )
+        message = mock_build_send.call_args[0][0]
+        assert message.oscillation_mode == "Oscillation"
+        assert message._body[7] == 0x02
+        assert message._body[50] == 12
+
+        mock_build_send.reset_mock()
+        with patch.object(self.device, "build_send") as mock_build_send:
+            self.device.set_attribute(
+                DeviceAttributes.tilting_angle.value,
+                "60",
+            )
+        message = mock_build_send.call_args[0][0]
+        assert message.oscillation_mode == "Tilting"
+        assert message._body[7] == 0x04
+        assert message._body[24] == 12
 
     def test_set_attribute_oscillation_mode(self) -> None:
         """Test set attribute oscillation mode."""
