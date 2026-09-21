@@ -191,6 +191,64 @@ class TestMessageSet:
 class TestMessageNewSet:
     """Test the FA protocol v5 set message."""
 
+    def test_body_controls_match_lua_layout(self) -> None:
+        """Test the v5 control fields and offsets from the Lua protocol."""
+        msg = MessageNewSet(ProtocolVersion.V1, 0)
+        msg.power = True
+        msg.voice = "open_buzzer"
+        msg.child_lock = True
+        msg.mode = 3
+        msg.fan_speed = 3
+        msg.target_temperature = 25
+        msg.humidity = 50
+        msg.oscillate = True
+        msg.oscillation_mode = "Both"
+        msg.oscillation_angle = 60
+        msg.tilting_angle = 60
+        msg.humidify = True
+        msg.anophelifuge = True
+        msg.anion = True
+        msg.body_feeling_scan = True
+        msg.scene = "sleep"
+        msg.auto_power_off = True
+        msg.display_on_off = True
+        msg.waterions = True
+
+        body = msg._body
+        assert body[1] == 4
+        assert body[2] == 1
+        assert body[3] == 0x07
+        assert body[4] == 3
+        assert body[5] == 66
+        assert body[6] == 50
+        assert body[7] == 0x0C
+        assert body[8] == 0x35
+        assert body[14] == 1
+        assert body[15] == 4
+        assert body[18] == 0x40
+        assert body[22] == 5
+        assert body[23] == 0x40
+        assert body[33] == 1
+        assert body[50] == 12
+
+    def test_body_invalid_controls_are_omitted(self) -> None:
+        """Test invalid v5 controls do not write out-of-range values."""
+        msg = MessageNewSet(ProtocolVersion.V1, 0)
+        msg.voice = "unknown"
+        msg.fan_speed = 27
+        msg.target_temperature = 51
+        msg.humidity = 0
+        msg.oscillation_angle = "invalid"
+        msg.tilting_angle = -1
+        msg.scene = "unknown"
+
+        body = msg._body
+        assert body[1] == 0
+        assert body[4] == 0
+        assert body[5] == 0
+        assert body[6] == 0
+        assert body[15] == 0
+
     def test_body_defaults_match_lua_layout(self) -> None:
         """Test protocol marker and invalid-control defaults."""
         msg = MessageNewSet(ProtocolVersion.V1, 0)

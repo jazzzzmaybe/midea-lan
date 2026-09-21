@@ -211,9 +211,17 @@ class MideaFADevice(MideaDevice):
         elif attr == DeviceAttributes.mode:
             result = self._modes.get(_status_code(value))
         elif attr == DeviceAttributes.voice:
-            result = self._voice.get(_status_code(value))
+            result = (
+                value
+                if isinstance(value, str)
+                else self._voice.get(_status_code(value))
+            )
         elif attr == DeviceAttributes.scene:
-            result = self._scene.get(_status_code(value))
+            result = (
+                value
+                if isinstance(value, str)
+                else self._scene.get(_status_code(value))
+            )
         return result
 
     def process_message(self, msg: bytes) -> dict[str, Any]:

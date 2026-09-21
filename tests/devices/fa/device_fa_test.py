@@ -224,6 +224,40 @@ class TestMideaFADevice:
         assert message._body[22] == 5
         assert message._body[50] == 0xFF
 
+    def test_protocol_v5_status_fields(self) -> None:
+        """Test protocol v5 status fields are exposed and decoded."""
+        body = bytearray(52)
+        body[1] = 0x12
+        body[2] = 4
+        body[3] = 0x01
+        body[4] = 0x07
+        body[5] = 3
+        body[6] = 66
+        body[7] = 50
+        body[9] = 0x35
+        body[12] = 55
+        body[13] = 66
+        body[15] = 1
+        body[16] = 4
+        body[19] = 0x40
+        body[23] = 5
+        body[24] = 0x40
+        body[34] = 1
+        body[51] = 12
+
+        status = self.device.process_message(
+            _build_message(ProtocolVersion.V1, MessageType.query, body),
+        )
+
+        assert status[DeviceAttributes.voice.value] == "open_buzzer"
+        assert status[DeviceAttributes.error_code.value] == 0x12
+        assert status[DeviceAttributes.target_temperature.value] == 25.0
+        assert status[DeviceAttributes.humidity.value] == 50
+        assert status[DeviceAttributes.humidify_mode.value] == "1"
+        assert status[DeviceAttributes.scene.value] == "sleep"
+        assert status[DeviceAttributes.humidify_feedback.value] == 55
+        assert status[DeviceAttributes.temperature_feedback.value] == 25.0
+
     def test_legacy_long_body_does_not_select_protocol_v5(self) -> None:
         """Test a legacy long body is not detected as protocol v5."""
         body = MessageSet(ProtocolVersion.V1, 0).body
