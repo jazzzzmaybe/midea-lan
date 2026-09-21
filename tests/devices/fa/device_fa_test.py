@@ -226,7 +226,7 @@ class TestMideaFADevice:
 
     def test_legacy_long_body_does_not_select_protocol_v5(self) -> None:
         """Test a legacy long body is not detected as protocol v5."""
-        body = bytearray(49)
+        body = MessageSet(ProtocolVersion.V1, 0).body
         body[23] = 5
         self.device.process_message(
             _build_message(ProtocolVersion.V1, MessageType.query, body),
