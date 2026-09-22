@@ -624,7 +624,6 @@ class PropertiesDefaultQuery(MessageACBase):
         return _body
 
 
-
 class _PropertiesCapsQueryBase(MessageACBase):
     """Base class for capability-based properties queries.
 
@@ -1942,6 +1941,9 @@ class SubProtocolBody(MessageBody):
 
 class MessageACResponse(MessageResponse):
     """AC message response."""
+
+    # Populated dynamically by MessageResponse.set_attr().
+    degerming_active: bool
 
     def __init__(
         self,
