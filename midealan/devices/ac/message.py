@@ -113,6 +113,24 @@ NEW_PROTOCOL_INDOOR_TEMPERATURE_DECIMAL_BYTE = 41
 # flag. Verified on model 22019053 / protocol v3 with device-side toggles.
 NEW_PROTOCOL_DEGERMING_BYTE = 19
 NEW_PROTOCOL_DEGERMING_MASK = 0x02
+# Light sensitivity and the countdown timer slots ride the same 0x7e payload on
+# the same verified hardware: light sensitivity is a 2-bit field (0 = off,
+# 3 = on; the intermediate levels 1/2 exist but are not characterized yet) and
+# the countdown timers are two independent slots, power-on and power-off
+# (0x7f means idle, otherwise bit 7 is set and the value equals
+# 0x7f + minutes / 15, e.g. 0x93 = 300 min = 5 h). The indexes below are
+# offsets into the parsed 0x7e payload as exposed by the parser (payload[0] is
+# the leading seq/flag byte, so raw payload byte N sits at index N + 1 - the
+# same convention as NEW_PROTOCOL_DEGERMING_BYTE).
+NEW_PROTOCOL_LIGHT_SENSITIVE_BYTE = 23
+NEW_PROTOCOL_LIGHT_SENSITIVE_MASK = 0xC0
+NEW_PROTOCOL_POWER_ON_TIMER_BYTE = 4
+NEW_PROTOCOL_POWER_OFF_TIMER_BYTE = 5
+NEW_PROTOCOL_TIMER_ARMED_MASK = 0x80
+NEW_PROTOCOL_TIMER_MINUTES_PER_STEP = 15
+# Live self-clean state is carried by the same payload (byte 8 bit 2).
+NEW_PROTOCOL_SELF_CLEAN_BYTE = 8
+NEW_PROTOCOL_SELF_CLEAN_MASK = 0x04
 
 # Capability value semantics (reverse-engineered; see _parse_capabilities).
 # The raw byte of each capability is not a 0/1 flag; each has its own value set.
@@ -225,6 +243,7 @@ class CapabilityTag(IntEnum):
     out_silent = 0x00CD
     ieco = 0x00E3
     pre_cool_hot = 0x0201
+    light_sensitive = 0x0208  # queryType == "light_sensitive"
     pm25_value = 0x020B
     wind_speed = 0x0210
     eco = 0x0212
@@ -526,6 +545,8 @@ PROPERTIES_TAGS: frozenset[int] = COMMON_TAGS | frozenset(
         CapabilityTag.screen_display,  # 0x0017
         CapabilityTag.error_code,  # 0x003F
         CapabilityTag.fresh_air_1,  # 0x0233
+        CapabilityTag.degerming,  # 0x005A
+        CapabilityTag.light_sensitive,  # 0x0208
     },
 )
 
@@ -541,7 +562,6 @@ CAPABILITY_ONLY_TAGS: frozenset[int] = frozenset(
         CapabilityTag.prevent_super_cool,  # 0x0049
         CapabilityTag.parent_control,  # 0x0051
         CapabilityTag.prevent_straight_wind_lr,  # 0x0058
-        CapabilityTag.degerming,  # 0x005A
         CapabilityTag.temperature,  # 0x0225
         CapabilityTag.twins_machine,  # 0x0232
         CapabilityTag.body_check,  # 0x0234
@@ -1048,6 +1068,7 @@ class PropertiesSet(MessageACBase):
         self.sound: bool | None = None
         self.self_clean: bool | None = None
         self.degerming: bool | None = None
+        self.light_sensitive: bool | None = None
         self.ieco: bool | None = None
         self.ieco_number: int = 1
 
@@ -1172,6 +1193,17 @@ class PropertiesSet(MessageACBase):
                     value=bytearray([0x01 if self.degerming else 0x00]),
                 ),
             )
+        if self.light_sensitive is not None:
+            pack_count += 1
+            payload.extend(
+                NewProtocolMessageBody.pack(
+                    param=CapabilityTag.light_sensitive,
+                    # The payload carries a 2-bit level; the vendor app only
+                    # uses 0x00 (off) and 0x03 (on) - verified with LAN set
+                    # frames on both models.
+                    value=bytearray([0x03 if self.light_sensitive else 0x00]),
+                ),
+            )
         if self.rate_select is not None:
             pack_count += 1
             payload.extend(
@@ -1292,6 +1324,35 @@ class XA1Body(XMessageBody):
 class PropertiesBody(NewProtocolMessageBody):
     """AC Bx message body. body[0] b0/b1, body[1] propertyNumber, cursor 2."""
 
+    @staticmethod
+    def _parse_countdown_timer(value: int) -> int:
+        """Decode a countdown timer byte into minutes (0 = not armed).
+
+        The timer slots read 0x7f when idle; otherwise bit 7 is set and the
+        value equals 0x7f + minutes / 15 (captured app-side sets: 0x93 = 5 h,
+        0x95 = 5.5 h).
+        """
+        if not (value & NEW_PROTOCOL_TIMER_ARMED_MASK):
+            return 0
+        return (
+            value - NEW_PROTOCOL_TIMER_ARMED_MASK + 1
+        ) * NEW_PROTOCOL_TIMER_MINUTES_PER_STEP
+
+    def _parse_queried_states(self, params: dict[int, bytearray]) -> None:
+        """Parse live states from queried property tags (B0/B1 bodies only).
+
+        A B5 body carries these tags as capability flags rather than live
+        state, so it is filtered out here; the 0x7e payload carries the same
+        states for every body type (parsed in __init__ below).
+        """
+        if CapabilityTag.degerming in params and self.body_type != ListTypes.B5:
+            # Queried degerming state (0x00 off / 0x01 on).
+            self.degerming_active = params[CapabilityTag.degerming][0] > 0
+        if CapabilityTag.light_sensitive in params and self.body_type != ListTypes.B5:
+            # Queried light sensitivity level (0 = off, 1-3 = on, matching the
+            # 0x7e payload byte).
+            self.light_sensitive_active = params[CapabilityTag.light_sensitive][0] > 0
+
     def __init__(
         self,
         body: bytearray,
@@ -1339,17 +1400,47 @@ class PropertiesBody(NewProtocolMessageBody):
             # A B5 body carries this tag as a capability flag (always 1 when the
             # model supports self-clean), so only B0/B1 bodies report live state.
             self.self_clean_active: bool = params[CapabilityTag.self_clean][0] > 0
+        self._parse_queried_states(params)
         if (
             NEW_PROTOCOL_TEMPERATURE_TAG in params
             and len(params[NEW_PROTOCOL_TEMPERATURE_TAG]) > NEW_PROTOCOL_DEGERMING_BYTE
         ):
-            # Live degerming (sterilize) state. Unlike self_clean, a B5 notify
-            # body carries the live value as well (verified with state toggles),
+            # Live degerming (sterilize) state. A B5 notify body carries the
+            # live value as well (verified with state toggles),
             # so no body-type filter is applied here. The notify payload's raw
             # head differs from B0/B1, but this slice keeps index 19 valid.
-            self.degerming_active: bool = (
+            self.degerming_active = (
                 params[NEW_PROTOCOL_TEMPERATURE_TAG][NEW_PROTOCOL_DEGERMING_BYTE]
                 & NEW_PROTOCOL_DEGERMING_MASK
+            ) > 0
+        if (
+            NEW_PROTOCOL_TEMPERATURE_TAG in params
+            and len(params[NEW_PROTOCOL_TEMPERATURE_TAG])
+            > NEW_PROTOCOL_LIGHT_SENSITIVE_BYTE
+        ):
+            # Light sensitivity, the two countdown timer slots and the live
+            # self-clean state share the 0x7e payload with the state bytes
+            # above and, like degerming, are reported in B0/B1 bodies as
+            # well as B5 notify bodies.
+            new_protocol_data = params[NEW_PROTOCOL_TEMPERATURE_TAG]
+            self.light_sensitive_active = (
+                new_protocol_data[NEW_PROTOCOL_LIGHT_SENSITIVE_BYTE]
+                & NEW_PROTOCOL_LIGHT_SENSITIVE_MASK
+            ) > 0
+            self.power_on_timer: int = self._parse_countdown_timer(
+                new_protocol_data[NEW_PROTOCOL_POWER_ON_TIMER_BYTE],
+            )
+            self.power_off_timer: int = self._parse_countdown_timer(
+                new_protocol_data[NEW_PROTOCOL_POWER_OFF_TIMER_BYTE],
+            )
+            # The live self-clean state is carried by this payload too. The
+            # property tag above only advertises the capability in B5
+            # bodies, so this byte is what updates B5 notifies as well;
+            # both sources agree within a frame (verified against app
+            # driven start/cancel captures).
+            self.self_clean_active = (
+                new_protocol_data[NEW_PROTOCOL_SELF_CLEAN_BYTE]
+                & NEW_PROTOCOL_SELF_CLEAN_MASK
             ) > 0
         if (
             CapabilityTag.ieco in params
@@ -1944,6 +2035,10 @@ class MessageACResponse(MessageResponse):
 
     # Populated dynamically by MessageResponse.set_attr().
     degerming_active: bool
+    light_sensitive_active: bool
+    power_on_timer: int
+    power_off_timer: int
+    self_clean_active: bool
 
     def __init__(
         self,
