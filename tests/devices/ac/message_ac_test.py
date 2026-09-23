@@ -1925,6 +1925,41 @@ class TestMessageACResponse:
         assert hasattr(response, "self_clean_active")
         assert response.self_clean_active is expected
 
+    @pytest.mark.parametrize(
+        ("tag", "raw_value", "attribute", "expected"),
+        [
+            (CapabilityTag.light_sensitive, 0x03, "light_sensitive_active", True),
+            (CapabilityTag.light_sensitive, 0x00, "light_sensitive_active", False),
+            (CapabilityTag.degerming, 0x01, "degerming_active", True),
+            (CapabilityTag.degerming, 0x00, "degerming_active", False),
+        ],
+    )
+    def test_message_query_b1_tag_only_states(
+        self,
+        tag: CapabilityTag,
+        raw_value: int,
+        attribute: str,
+        expected: bool,
+    ) -> None:
+        """Test queried tags parse without a 0x7e payload."""
+        # B1 body: body_type(1) + count(1) + tag(2) + 0x00 + length(1) + value(1)
+        self.header[9] = 0x03
+        body = bytearray(
+            [
+                0xB1,  # Body type
+                0x01,  # Params count
+                tag & 0xFF,
+                tag >> 8,
+                0x00,
+                0x01,  # Value length
+                raw_value,
+                0x00,  # trailing checksum byte (stripped by MessageResponse)
+            ],
+        )
+
+        response = MessageACResponse(self.header + body)
+        assert getattr(response, attribute) is expected
+
     def test_message_notify2_b5_self_clean_is_capability_only(self) -> None:
         """Test that tag 0x0039 in a B5 body is not read as live state."""
         # B5 advertises self-clean support with a constant 0x01, so it must not
