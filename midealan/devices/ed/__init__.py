@@ -6,6 +6,7 @@ from typing import Any, Unpack
 
 from midealan.const import DeviceType
 from midealan.device import MideaDevice, MideaDeviceInitKwargs
+from midealan.exceptions import ValueWrongType
 from midealan.message import ListTypes
 
 from .message import (
@@ -443,6 +444,11 @@ class MideaEDDevice(MideaDevice):
         """Midea ED device set attribute."""
         if self._set_tea_bar_attribute(attr, value):
             return
+        if attr in [
+            DeviceAttributes.wash,
+            DeviceAttributes.antifreeze,
+        ] and not isinstance(value, bool):
+            raise ValueWrongType("[ed] Expected bool")
         message: MessageNewSet | MessageOldSet | None = None
         if self._use_new_set():
             if attr in [

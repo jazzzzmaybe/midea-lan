@@ -18,6 +18,7 @@ from midealan.devices.ed.message import (
     MessageQuery09,
     MessageQueryFF,
 )
+from midealan.exceptions import ValueWrongType
 from midealan.message import ListTypes
 
 TEST_AUTH_VALUE = "AA"
@@ -985,6 +986,17 @@ class TestMideaEDDeviceSoftWater:
             assert message.body == bytearray(
                 [0x15, 0x01, 0x01, 0x03, 0x05, 0x00, 0x00, 0x00],
             )
+
+    @pytest.mark.parametrize("value", ["False", "True", 5])
+    def test_set_attribute_wash_antifreeze_require_bool(self, value: str | int) -> None:
+        """Test a non-bool wash or antifreeze value raises and does not send."""
+        for attr in (DeviceAttributes.wash, DeviceAttributes.antifreeze):
+            with (
+                patch.object(self.device, "build_send") as mock_build_send,
+                pytest.raises(ValueWrongType, match="Expected bool"),
+            ):
+                self.device.set_attribute(attr, value)
+            mock_build_send.assert_not_called()
 
     def test_set_attribute_timing_regeneration_hour_couples_min(self) -> None:
         """Test setting hour also sends current min value (coupled write)."""
