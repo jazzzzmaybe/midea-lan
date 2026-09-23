@@ -1304,6 +1304,8 @@ class MideaACDevice(MideaDevice):
             DeviceAttributes.target_indoor_fan_speed,
             DeviceAttributes.water_pump_running,
             DeviceAttributes.compressor_power,
+            DeviceAttributes.power_on_timer,
+            DeviceAttributes.power_off_timer,
         ]:
             if attr == DeviceAttributes.prompt_tone:
                 self._attributes[DeviceAttributes.prompt_tone] = value
