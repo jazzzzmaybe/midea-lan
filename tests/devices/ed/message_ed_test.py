@@ -985,6 +985,12 @@ class TestEDMessageBodyFF:
         assert not hasattr(message, "life2")
         assert not hasattr(message, "life3")
 
+        # The record declares one more byte than the body contains.
+        message = EDMessageBodyFF(
+            body=bytearray([0xFF, 0x01, 0x03, 0x3B, 0x40, 82, 0x00]),
+        )
+        assert not hasattr(message, "hot_pot_temperature")
+
     def test_ed_message_ff_life_only_breaks(self) -> None:
         """Test EDMessageBodyFF stops after a life-only body."""
         body = bytearray([0xFF, 0x01, 0x07, 0x10, 0x40, 0x01, 0x02, 0x03, 0x00])

@@ -784,9 +784,11 @@ class EDMessageBodyFF(MessageBody):
         while data_offset + 2 < len(body):
             length = (body[data_offset + 2] >> 4) + 2
             attr = ((body[data_offset + 2] % 16) << 8) + body[data_offset + 1]
+            if data_offset + length >= len(body):
+                break
             if attr == Attributes.CHILD_LOCK:
                 # Stop before reading fields from a truncated CHILD_LOCK record.
-                if length < FF_FOUR_BYTE_RECORD_LENGTH or data_offset + 6 >= len(body):
+                if length < FF_FOUR_BYTE_RECORD_LENGTH:
                     break
                 self.filter = (body[data_offset + 3] & FF_FILTER_FLAG) > 0
                 self.wash = (body[data_offset + 3] & FF_WASH_FLAG) > 0
@@ -802,7 +804,6 @@ class EDMessageBodyFF(MessageBody):
             elif (
                 attr == Attributes.WATER_CONSUMPTION
                 and length >= FF_FOUR_BYTE_RECORD_LENGTH
-                and data_offset + 6 < len(body)
             ):
                 self.water_consumption = (
                     float(
@@ -813,18 +814,10 @@ class EDMessageBodyFF(MessageBody):
                     )
                     / 1000
                 )
-            elif (
-                attr == Attributes.TDS
-                and length >= FF_FOUR_BYTE_RECORD_LENGTH
-                and data_offset + 6 < len(body)
-            ):
+            elif attr == Attributes.TDS and length >= FF_FOUR_BYTE_RECORD_LENGTH:
                 self.in_tds = body[data_offset + 3] + (body[data_offset + 4] << 8)
                 self.out_tds = body[data_offset + 5] + (body[data_offset + 6] << 8)
-            elif (
-                attr == Attributes.LIFE
-                and length >= FF_THREE_BYTE_RECORD_LENGTH
-                and data_offset + 5 < len(body)
-            ):
+            elif attr == Attributes.LIFE and length >= FF_THREE_BYTE_RECORD_LENGTH:
                 self.life1 = body[data_offset + 3]
                 self.life2 = body[data_offset + 4]
                 self.life3 = body[data_offset + 5]
@@ -843,41 +836,24 @@ class EDMessageBodyFF(MessageBody):
         body: bytearray,
     ) -> None:
         """Parse a water purifier (FF body) status record."""
-        if (
-            attr == Attributes.ERROR_CODE
-            and length >= FF_SINGLE_BYTE_RECORD_LENGTH
-            and data_offset + 3 < len(body)
-        ):
+        if attr == Attributes.ERROR_CODE and length >= FF_SINGLE_BYTE_RECORD_LENGTH:
             self.error = body[data_offset + 3]
-        elif (
-            attr == Attributes.MAX_LIFE
-            and length >= FF_LIFE_RECORD_LENGTH
-            and data_offset + 7 < len(body)
-        ):
+        elif attr == Attributes.MAX_LIFE and length >= FF_LIFE_RECORD_LENGTH:
             self.maxlife1 = body[data_offset + 3]
             self.maxlife2 = body[data_offset + 4]
             self.maxlife3 = body[data_offset + 5]
             self.maxlife4 = body[data_offset + 6]
             self.maxlife5 = body[data_offset + 7]
-        elif (
-            attr == Attributes.WATER_KIND
-            and length >= FF_WATER_KIND_RECORD_LENGTH
-            and data_offset + 5 < len(body)
-        ):
+        elif attr == Attributes.WATER_KIND and length >= FF_WATER_KIND_RECORD_LENGTH:
             self.water_kind = body[data_offset + 3]
             self.heat_start = body[data_offset + 4]
             self.ice_gall_status = body[data_offset + 5]
         elif (
             attr == Attributes.HOT_POT_TEMPERATURE
             and length >= FF_SINGLE_BYTE_RECORD_LENGTH
-            and data_offset + 3 < len(body)
         ):
             self.hot_pot_temperature = body[data_offset + 3]
-        elif (
-            attr == Attributes.ANTIFREEZE
-            and length >= FF_SINGLE_BYTE_RECORD_LENGTH
-            and data_offset + 3 < len(body)
-        ):
+        elif attr == Attributes.ANTIFREEZE and length >= FF_SINGLE_BYTE_RECORD_LENGTH:
             self.antifreeze = (body[data_offset + 3] & FF_ANTIFREEZE_FLAG) > 0
 
 
