@@ -11,6 +11,7 @@ from midealan.message import ListTypes
 
 from .message import (
     TEA_BAR_SUBTYPE,
+    WATER_PURIFIER_WASH_SECONDS,
     MessageEDResponse,
     MessageNewSet,
     MessageOldSet,
@@ -474,6 +475,15 @@ class MideaEDDevice(MideaDevice):
         if message is not None:
             self._attributes[attr] = value
             setattr(message, str(attr), value)
+            if (
+                attr == DeviceAttributes.wash
+                and value
+                and isinstance(
+                    message,
+                    MessageNewSet,
+                )
+            ):
+                message.wash_seconds = WATER_PURIFIER_WASH_SECONDS
             if attr == DeviceAttributes.leak_water_protection_value:
                 current_protection = self._attributes.get(
                     DeviceAttributes.leak_water_protection,

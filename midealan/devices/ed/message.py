@@ -34,6 +34,8 @@ TEA_BAR_ERROR_OFFSET = 52
 # Water purifier FF body constants.
 # Record lengths cover the two-byte record header plus the payload.
 FF_SINGLE_BYTE_RECORD_LENGTH = 3
+FF_THREE_BYTE_RECORD_LENGTH = 5
+FF_FOUR_BYTE_RECORD_LENGTH = 6
 FF_WATER_KIND_RECORD_LENGTH = 5
 FF_LIFE_RECORD_LENGTH = 7
 # Status flags of the 0x000 record.
@@ -372,6 +374,7 @@ class MessageNewSet(MessageEDBase):
         self.cooling: bool | None = None
         # Water purifier controls from the official ED Lua encoder.
         self.wash: bool | None = None
+        self.wash_seconds: int | None = None
         self.antifreeze: bool | None = None
 
     @property
@@ -549,7 +552,11 @@ class MessageNewSet(MessageEDBase):
                 EDNewSetParamPack.pack(
                     param=NewSetTags.wash,
                     value=0x01 if self.wash else 0x00,
-                    addition=WATER_PURIFIER_WASH_SECONDS if self.wash else 0x00,
+                    addition=(
+                        self.wash_seconds
+                        if self.wash and self.wash_seconds is not None
+                        else 0x00
+                    ),
                 ),
             )
         if self.antifreeze is not None:
@@ -774,12 +781,12 @@ class EDMessageBodyFF(MessageBody):
         """Initialize ED message body FF."""
         super().__init__(body)
         data_offset = 2
-        while True:
+        while data_offset + 2 < len(body):
             length = (body[data_offset + 2] >> 4) + 2
             attr = ((body[data_offset + 2] % 16) << 8) + body[data_offset + 1]
             if attr == Attributes.CHILD_LOCK:
                 # Stop before reading fields from a truncated CHILD_LOCK record.
-                if data_offset + length + 6 > len(body):
+                if length < FF_FOUR_BYTE_RECORD_LENGTH or data_offset + 6 >= len(body):
                     break
                 self.filter = (body[data_offset + 3] & FF_FILTER_FLAG) > 0
                 self.wash = (body[data_offset + 3] & FF_WASH_FLAG) > 0
@@ -792,7 +799,11 @@ class EDMessageBodyFF(MessageBody):
                 self.power = (body[data_offset + 6] & FF_POWER_FLAG) > 0
                 self.sleep_status = (body[data_offset + 6] & FF_SLEEP_FLAG) > 0
                 self.backflow = (body[data_offset + 6] & FF_BACKFLOW_FLAG) > 0
-            elif attr == Attributes.WATER_CONSUMPTION:
+            elif (
+                attr == Attributes.WATER_CONSUMPTION
+                and length >= FF_FOUR_BYTE_RECORD_LENGTH
+                and data_offset + 6 < len(body)
+            ):
                 self.water_consumption = (
                     float(
                         body[data_offset + 3]
@@ -802,10 +813,18 @@ class EDMessageBodyFF(MessageBody):
                     )
                     / 1000
                 )
-            elif attr == Attributes.TDS:
+            elif (
+                attr == Attributes.TDS
+                and length >= FF_FOUR_BYTE_RECORD_LENGTH
+                and data_offset + 6 < len(body)
+            ):
                 self.in_tds = body[data_offset + 3] + (body[data_offset + 4] << 8)
                 self.out_tds = body[data_offset + 5] + (body[data_offset + 6] << 8)
-            elif attr == Attributes.LIFE:
+            elif (
+                attr == Attributes.LIFE
+                and length >= FF_THREE_BYTE_RECORD_LENGTH
+                and data_offset + 5 < len(body)
+            ):
                 self.life1 = body[data_offset + 3]
                 self.life2 = body[data_offset + 4]
                 self.life3 = body[data_offset + 5]
@@ -814,9 +833,6 @@ class EDMessageBodyFF(MessageBody):
                     self.life5 = body[data_offset + 7]
             else:
                 self._parse_water_purifier_record(attr, data_offset, length, body)
-            # Stop when the next record would run past the body.
-            if data_offset + length + 6 > len(body):
-                break
             data_offset += length
 
     def _parse_water_purifier_record(

@@ -344,9 +344,18 @@ class TestMessageNewSet:
         """Test MessageNewSet filter wash uses the official Lua encoding."""
         new_set = MessageNewSet(protocol_version=ProtocolVersion.V1)
         new_set.wash = True
+        # Lua sends a zero duration when wash_seconds is omitted.
+        assert new_set.body == bytearray(
+            [0x15, 0x01, 0x01, 0x00, 0x03, 0x01, 0x00, 0x00],
+        )
+        new_set.wash_seconds = 60
         # setbytes(0x00, 0x03, 0x01, 0x3C, 0x00) -> 60 seconds of wash.
         assert new_set.body == bytearray(
             [0x15, 0x01, 0x01, 0x00, 0x03, 0x01, 0x3C, 0x00],
+        )
+        new_set.wash_seconds = 321
+        assert new_set.body == bytearray(
+            [0x15, 0x01, 0x01, 0x00, 0x03, 0x01, 0x41, 0x01],
         )
         new_set.wash = False
         # The Lua encoder sends setbytes(0x00, 0x03, 0x00, 0x00, 0x00) to stop the wash.
@@ -954,6 +963,27 @@ class TestEDMessageBodyFF:
         # so parsing must stop before setting child_lock/power.
         assert not hasattr(message, "child_lock")
         assert not hasattr(message, "power")
+
+    def test_ed_message_ff_complete_final_record_is_parsed(self) -> None:
+        """Test the final complete FF record is not skipped."""
+        message = EDMessageBodyFF(
+            body=bytearray([0xFF, 0x01, 0x03, 0x3B, 0x10, 82]),
+        )
+        assert message.hot_pot_temperature == 82
+
+    def test_ed_message_ff_missing_record_header_is_ignored(self) -> None:
+        """Test a body ending before a record header is ignored."""
+        message = EDMessageBodyFF(body=bytearray([0xFF, 0x01]))
+        assert message.body_type == 255
+
+    def test_ed_message_ff_short_fixed_records_are_skipped(self) -> None:
+        """Test fixed-width FF records are length-checked before reading."""
+        message = EDMessageBodyFF(
+            body=bytearray([0xFF, 0x01, 0x03, 0x10, 0x20, 0x01, 0x02]),
+        )
+        assert not hasattr(message, "life1")
+        assert not hasattr(message, "life2")
+        assert not hasattr(message, "life3")
 
     def test_ed_message_ff_life_only_breaks(self) -> None:
         """Test EDMessageBodyFF stops after a life-only body."""
