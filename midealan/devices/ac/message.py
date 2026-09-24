@@ -116,9 +116,9 @@ NEW_PROTOCOL_DEGERMING_MASK = 0x02
 # Light sensitivity and the countdown timer slots ride the same 0x7e payload on
 # the same verified hardware: light sensitivity is a 2-bit field (0 = off,
 # 3 = on; the intermediate levels 1/2 exist but are not characterized yet) and
-# the countdown timers are two independent slots, power-on and power-off
-# (0x7f means idle, otherwise bit 7 is set and the value equals
-# 0x7f + minutes / 15, e.g. 0x93 = 300 min = 5 h). The indexes below are
+# the countdown timers are two independent slots, power-on and power-off. The
+# high bit is the armed flag, the lower bits carry hours plus quarter-hours,
+# and byte 6 carries per-slot minute correction nibbles. The indexes below are
 # offsets into the parsed 0x7e payload as exposed by the parser (payload[0] is
 # the leading seq/flag byte, so raw payload byte N sits at index N + 1 - the
 # same convention as NEW_PROTOCOL_DEGERMING_BYTE).
@@ -126,8 +126,16 @@ NEW_PROTOCOL_LIGHT_SENSITIVE_BYTE = 23
 NEW_PROTOCOL_LIGHT_SENSITIVE_MASK = 0xC0
 NEW_PROTOCOL_POWER_ON_TIMER_BYTE = 4
 NEW_PROTOCOL_POWER_OFF_TIMER_BYTE = 5
+NEW_PROTOCOL_TIMER_MINUTE_CORRECTION_BYTE = 6
 NEW_PROTOCOL_TIMER_ARMED_MASK = 0x80
-NEW_PROTOCOL_TIMER_MINUTES_PER_STEP = 15
+NEW_PROTOCOL_TIMER_VALUE_MASK = 0x7F
+NEW_PROTOCOL_TIMER_HOUR_SHIFT = 2
+NEW_PROTOCOL_TIMER_QUARTER_MASK = 0x03
+NEW_PROTOCOL_TIMER_MINUTE_CORRECTION_MASK = 0x0F
+NEW_PROTOCOL_TIMER_MINUTE_CORRECTION_MAX = 15
+NEW_PROTOCOL_TIMER_MINUTES_PER_HOUR = 60
+NEW_PROTOCOL_TIMER_MINUTES_PER_QUARTER = 15
+NEW_PROTOCOL_TIMER_POWER_ON_CORRECTION_SHIFT = 4
 # Live self-clean state is carried by the same payload (byte 8 bit 2).
 NEW_PROTOCOL_SELF_CLEAN_BYTE = 8
 NEW_PROTOCOL_SELF_CLEAN_MASK = 0x04
@@ -1325,18 +1333,18 @@ class PropertiesBody(NewProtocolMessageBody):
     """AC Bx message body. body[0] b0/b1, body[1] propertyNumber, cursor 2."""
 
     @staticmethod
-    def _parse_countdown_timer(value: int) -> int:
-        """Decode a countdown timer byte into minutes (0 = not armed).
-
-        The timer slots read 0x7f when idle; otherwise bit 7 is set and the
-        value equals 0x7f + minutes / 15 (captured app-side sets: 0x93 = 5 h,
-        0x95 = 5.5 h).
-        """
+    def _parse_countdown_timer(value: int, minute_correction: int) -> int:
+        """Decode an armed countdown timer into minutes (0 = not armed)."""
         if not (value & NEW_PROTOCOL_TIMER_ARMED_MASK):
             return 0
+        hours = (value & NEW_PROTOCOL_TIMER_VALUE_MASK) >> NEW_PROTOCOL_TIMER_HOUR_SHIFT
+        quarter_hours = value & NEW_PROTOCOL_TIMER_QUARTER_MASK
         return (
-            value - NEW_PROTOCOL_TIMER_ARMED_MASK + 1
-        ) * NEW_PROTOCOL_TIMER_MINUTES_PER_STEP
+            hours * NEW_PROTOCOL_TIMER_MINUTES_PER_HOUR
+            + quarter_hours * NEW_PROTOCOL_TIMER_MINUTES_PER_QUARTER
+            + NEW_PROTOCOL_TIMER_MINUTE_CORRECTION_MAX
+            - minute_correction
+        )
 
     def _parse_queried_states(self, params: dict[int, bytearray]) -> None:
         """Parse live states from queried property tags (B0/B1 bodies only).
@@ -1429,9 +1437,15 @@ class PropertiesBody(NewProtocolMessageBody):
             ) > 0
             self.power_on_timer: int = self._parse_countdown_timer(
                 new_protocol_data[NEW_PROTOCOL_POWER_ON_TIMER_BYTE],
+                (
+                    new_protocol_data[NEW_PROTOCOL_TIMER_MINUTE_CORRECTION_BYTE]
+                    >> NEW_PROTOCOL_TIMER_POWER_ON_CORRECTION_SHIFT
+                ),
             )
             self.power_off_timer: int = self._parse_countdown_timer(
                 new_protocol_data[NEW_PROTOCOL_POWER_OFF_TIMER_BYTE],
+                new_protocol_data[NEW_PROTOCOL_TIMER_MINUTE_CORRECTION_BYTE]
+                & NEW_PROTOCOL_TIMER_MINUTE_CORRECTION_MASK,
             )
             # The live self-clean state is carried by this payload too. The
             # property tag above only advertises the capability in B5

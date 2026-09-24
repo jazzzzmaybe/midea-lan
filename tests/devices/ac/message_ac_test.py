@@ -36,6 +36,7 @@ from midealan.devices.ac.message import (
     MessageSubProtocolSet,
     PowerFormats,
     PowerQuery,
+    PropertiesBody,
     PropertiesCapsQuery,
     PropertiesCapsQuery1,
     PropertiesDefaultQuery,
@@ -1334,9 +1335,10 @@ class TestMessageACResponse:
         assert response.light_sensitive_active is True
 
     def test_b5_power_off_timer_armed(self) -> None:
-        """Test the power-off timer parses 5 h from a B5 notify (captured).
+        """Test the power-off timer parses a B5 notify (captured).
 
-        The vendor app set a 5 h countdown (0x93 = 0x7f + 300 / 15);
+        The vendor app set a 5 h countdown. The captured frame is one minute
+        into the countdown, so the Lua protocol decoder reports 299 minutes;
         the power-on slot stays idle.
         """
         response = MessageACResponse(
@@ -1345,14 +1347,15 @@ class TestMessageACResponse:
                 "00282832850e006805000000002000080000000000060001b123",
             ),
         )
-        assert response.power_off_timer == 300
+        assert response.power_off_timer == 299
         assert response.power_on_timer == 0
 
     def test_b1_power_off_timer_two_hours(self) -> None:
-        """Test the power-off timer parses 2 h from a B1 frame (captured).
+        """Test the power-off timer parses a B1 frame (captured).
 
-        The app then changed the countdown to 2 h (0x87 = 0x7f +
-        120 / 15).
+        The app then changed the countdown to 2 h. The captured frame is one
+        minute into the countdown, so the Lua protocol decoder reports 119
+        minutes.
         """
         response = MessageACResponse(
             bytearray.fromhex(
@@ -1361,7 +1364,7 @@ class TestMessageACResponse:
                 "00282832850e00680500000000200008000000000000004e22",
             ),
         )
-        assert response.power_off_timer == 120
+        assert response.power_off_timer == 119
 
     def test_b5_power_off_timer_cancelled(self) -> None:
         """Test the power-off timer reads idle after a cancel (captured).
@@ -1401,6 +1404,25 @@ class TestMessageACResponse:
             ),
         )
         assert response.power_on_timer == 330
+
+    @pytest.mark.parametrize(
+        ("value", "minute_correction", "expected"),
+        [
+            (0x95, 0, 330),
+            (0x95, 1, 329),
+            (0x7F, 0, 0),
+        ],
+    )
+    def test_countdown_timer_minute_correction(
+        self,
+        value: int,
+        minute_correction: int,
+        expected: int,
+    ) -> None:
+        """Test the Lua-compatible timer byte and minute correction formula."""
+        assert (
+            PropertiesBody._parse_countdown_timer(value, minute_correction) == expected
+        )
 
     def test_message_notify2_a0_short_body(self) -> None:
         """Skip Message parse notify2 A0 when the body is too short."""
