@@ -68,6 +68,8 @@ XC1_SUBBODY_TYPE_45 = 0x45
 XC1_SUBBODY_TYPE_47 = 0x47
 XC1_SUBBODY_TYPE_INDEX = 3
 XC1_HUMIDITY_INDEX = 4
+# Group 5 byte 10 is non-zero while the outdoor unit is defrosting (heat mode).
+XC1_DEFROST_INDEX = 10
 XC1_CONSUMPTION_MIN_LENGTH = 19
 XC1_OPERATING_TIME_MIN_LENGTH = 19
 
@@ -1904,6 +1906,8 @@ class GroupBody(MessageBody):
                 return
             # indoor humidity, it should be the same value as XBB/XA1 message
             self.indoor_humidity = body[4] if body[4] != 0 else None
+            if len(body) > XC1_DEFROST_INDEX:
+                self.defrosting = body[XC1_DEFROST_INDEX] != 0
 
     def _parse_group_one(self, body: bytearray) -> None:
         """Parse group 1 data: compressor and refrigerant circuit.

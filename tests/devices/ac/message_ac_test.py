@@ -2299,6 +2299,36 @@ class TestMessageACResponse:
         assert hasattr(response, "indoor_humidity")
         assert response.indoor_humidity is None
 
+    @pytest.mark.parametrize(
+        ("payload", "defrosting"),
+        [
+            # Captured frames from mill1000/midea-msmart#248
+            ("c12101451e4f2b5e003c01000000692900cf7e0001bb38", True),
+            ("c12101451e4dcf5e611f00000052ad2900cf7e0002", False),
+        ],
+    )
+    def test_message_query_c1_0x45_defrost(
+        self,
+        payload: str,
+        defrosting: bool,
+    ) -> None:
+        """Test Message parse query C1 0x45 defrost state."""
+        self.header[9] = 0x03
+        response = MessageACResponse(self.header + bytearray.fromhex(payload))
+        assert hasattr(response, "indoor_humidity")
+        assert response.indoor_humidity == 30
+        assert hasattr(response, "defrosting")
+        assert response.defrosting is defrosting
+
+    def test_message_query_c1_0x45_short_body_no_defrost(self) -> None:
+        """Test Message parse query C1 0x45 without the defrost byte."""
+        self.header[9] = 0x03
+        body = bytearray([0xC1, 0x21, 0x01, 0x45, 55, 0, 0, 0, 0, 0, 0])
+        response = MessageACResponse(self.header + body)
+        assert hasattr(response, "indoor_humidity")
+        assert response.indoor_humidity == 55
+        assert not hasattr(response, "defrosting")
+
     def test_message_query_c1_unknown_method(self) -> None:
         """Test Message parse query C1 with an unknown analysis method."""
         self.header[9] = 0x03
