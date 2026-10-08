@@ -177,6 +177,39 @@ NEW_PROTOCOL_INDIRECT_WIND_BYTE = 14
 NEW_PROTOCOL_INDIRECT_WIND_MASK = 0x40
 NEW_PROTOCOL_INDOOR_HUMIDITY_BYTE = 36
 NEW_PROTOCOL_INDOOR_HUMIDITY_MAX = 100
+# Live swing flags and fixed louver angles ride the same 0x7e payload: the
+# swing flags share the bit layout of the XA0/State bodies (byte 7: vertical
+# 0x0C / horizontal 0x03) and the louver angles sit in byte 17 (high nibble =
+# left-right, low nibble = up-down). The vendor Lua maps angle nibbles 2-9
+# onto the 100-based grades {13, 25, 38, 50, 62, 75, 88, 100}; nibbles 0/1
+# pass through unchanged. Only grades that the library angle maps
+# (_wind_lr_angles / _wind_ud_angles) can express are written; the
+# intermediate grades are skipped. Verified against the vendor Lua
+# read-side segments of models 22019061 / 22019053 (swing flags at
+# cursor+11; louver angles at cursor+21, plus a same-table direct-index
+# variant) and HA state history on model 22019061, 2026-10-08.
+NEW_PROTOCOL_SWING_BYTE = 7
+NEW_PROTOCOL_SWING_VERTICAL_MASK = 0x0C
+NEW_PROTOCOL_SWING_HORIZONTAL_MASK = 0x03
+NEW_PROTOCOL_WIND_ANGLE_BYTE = 17
+NEW_PROTOCOL_WIND_LR_ANGLE_SHIFT = 4
+NEW_PROTOCOL_WIND_UD_ANGLE_MASK = 0x0F
+NEW_PROTOCOL_WIND_ANGLE_GRADES: dict[int, int] = {
+    0: 0,
+    1: 1,
+    2: 13,
+    3: 25,
+    4: 38,
+    5: 50,
+    6: 62,
+    7: 75,
+    8: 88,
+    9: 100,
+}
+# Mirrors the keys of MideaACDevice._wind_lr_angles / _wind_ud_angles.
+NEW_PROTOCOL_WIND_ANGLE_LIB_GRADES: frozenset[int] = frozenset(
+    {0, 1, 25, 50, 75, 100},
+)
 # Generic branch of the 0x7e temperature payload (identical encoding to the
 # XA0 state body): setpoint = bits 1-5 + 12.0 (+0.5 when bit 0x40 is set);
 # indoor temperature = bytes 40/41. Read dual-path: the C0/A0/A1 sources
@@ -1633,18 +1666,37 @@ class PropertiesBody(NewProtocolMessageBody):
     ) -> None:
         """Read live state and generic-branch temperatures from the 0x7e payload.
 
-        Live power, mode, fan speed, indirect wind and indoor humidity ride the
-        same 0x7e payload (same encoding as the C0/A0 state bodies; verified
-        against HA state history on model 22019061, 2026-10-08). The generic
-        temperature branch (bytes 1, 40, 41; same encodings as XA0Body) is
-        dual-path: it does not set has_new_protocol_temperature, so the
-        C0/A0/A1 sources keep updating and are never suppressed. This is
-        skipped entirely for the 22013279 new-protocol-temperature path,
-        where byte-1 encoding is known to differ.
+        Live power, mode, fan speed, indirect wind, indoor humidity, swing
+        flags and fixed louver angles ride the same 0x7e payload (same
+        encoding as the C0/A0 state bodies; swing/angle encoding verified
+        against the vendor Lua and HA state history on model 22019061,
+        2026-10-08). The generic temperature branch (bytes 1, 40, 41; same
+        encodings as XA0Body) is dual-path: it does not set
+        has_new_protocol_temperature, so the C0/A0/A1 sources keep updating
+        and are never suppressed. This is skipped entirely for the 22013279
+        new-protocol-temperature path, where byte-1 encoding is known to
+        differ.
         """
         if new_protocol_temperature or NEW_PROTOCOL_TEMPERATURE_TAG not in params:
             return
         data = params[NEW_PROTOCOL_TEMPERATURE_TAG]
+        if len(data) > NEW_PROTOCOL_WIND_ANGLE_BYTE:
+            self.swing_vertical = (
+                data[NEW_PROTOCOL_SWING_BYTE] & NEW_PROTOCOL_SWING_VERTICAL_MASK
+            ) > 0
+            self.swing_horizontal = (
+                data[NEW_PROTOCOL_SWING_BYTE] & NEW_PROTOCOL_SWING_HORIZONTAL_MASK
+            ) > 0
+            lr_grade = NEW_PROTOCOL_WIND_ANGLE_GRADES.get(
+                data[NEW_PROTOCOL_WIND_ANGLE_BYTE] >> NEW_PROTOCOL_WIND_LR_ANGLE_SHIFT,
+            )
+            if lr_grade in NEW_PROTOCOL_WIND_ANGLE_LIB_GRADES:
+                self.wind_lr_angle = lr_grade
+            ud_grade = NEW_PROTOCOL_WIND_ANGLE_GRADES.get(
+                data[NEW_PROTOCOL_WIND_ANGLE_BYTE] & NEW_PROTOCOL_WIND_UD_ANGLE_MASK,
+            )
+            if ud_grade in NEW_PROTOCOL_WIND_ANGLE_LIB_GRADES:
+                self.wind_ud_angle = ud_grade
         if len(data) > NEW_PROTOCOL_INDOOR_HUMIDITY_BYTE:
             self.power = (data[NEW_PROTOCOL_POWER_BYTE] & NEW_PROTOCOL_POWER_MASK) > 0
             self.mode = (

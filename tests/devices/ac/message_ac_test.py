@@ -16,6 +16,7 @@ from midealan.devices.ac.message import (
     COMMON_TAGS,
     CONFORT_MODE_MIN_LENGTH2,
     FROST_PROTECT_MIN_LENGTH,
+    NEW_PROTOCOL_WIND_ANGLE_BYTE,
     PROPERTIES_TAGS,
     SMART_DRY_MIN_LENGTH,
     CapabilitiesQuery,
@@ -2460,6 +2461,10 @@ class TestMessageACResponse:
                     "indirect_wind": False,
                     "indoor_humidity": 51,
                     "indoor_temperature": 31.7,
+                    "swing_vertical": False,
+                    "swing_horizontal": True,
+                    "wind_lr_angle": 0,
+                    "wind_ud_angle": 0,
                 },
             ),
             # B5 18:18:33 fan full
@@ -2477,6 +2482,10 @@ class TestMessageACResponse:
                     "indirect_wind": False,
                     "indoor_humidity": 51,
                     "indoor_temperature": 31.7,
+                    "swing_vertical": False,
+                    "swing_horizontal": True,
+                    "wind_lr_angle": 0,
+                    "wind_ud_angle": 0,
                 },
             ),
             # B5 18:19:12 heat 30C
@@ -2494,6 +2503,10 @@ class TestMessageACResponse:
                     "indirect_wind": False,
                     "indoor_humidity": 48,
                     "indoor_temperature": 31.7,
+                    "swing_vertical": False,
+                    "swing_horizontal": False,
+                    "wind_lr_angle": 100,
+                    "wind_ud_angle": 0,
                 },
             ),
             # B5 12:07:06 power-off
@@ -2565,6 +2578,25 @@ class TestMessageACResponse:
         assert response.indoor_temperature == 26.0  # still in range
         assert not hasattr(response, "target_temperature")  # 43.5 C rejected
         assert not hasattr(response, "indoor_humidity")  # 120 rejected
+
+    def test_message_new_protocol_0x7e_angle_grade_guard(self) -> None:
+        """Test louver nibbles without a library grade are not written."""
+        # Real B5 notify frame (18:18:33.539) with payload[17] rewritten to
+        # lr nibble 2 (vendor Lua grade 13, not expressible by the library
+        # angle maps) and ud nibble 1 (a valid library grade).
+        frame = bytearray.fromhex(
+            "aa49ac00000000000805b5017e0038651da5647f7f0033000c00070000000f"
+            "000000f2000000e000000040000000003c00282833850e0070070000000020"
+            "00080000000000050001b5f6",
+        )
+        # A B5 payload starts at the 0x7e offset + 3 (tag, 1-byte length and
+        # the head byte); NEW_PROTOCOL_WIND_ANGLE_BYTE indexes the louver
+        # byte inside it.
+        frame[frame.find(b"\x7e") + 3 + NEW_PROTOCOL_WIND_ANGLE_BYTE] = 0x21
+        response = MessageACResponse(frame)
+        assert not hasattr(response, "wind_lr_angle")  # grade 13 skipped
+        assert hasattr(response, "wind_ud_angle")
+        assert response.wind_ud_angle == 1
 
     def test_message_query_c1_unknown_method(self) -> None:
         """Test Message parse query C1 with an unknown analysis method."""
