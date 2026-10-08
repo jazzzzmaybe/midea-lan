@@ -2425,6 +2425,147 @@ class TestMessageACResponse:
         assert response.indoor_humidity == 55
         assert not hasattr(response, "defrosting")
 
+    @pytest.mark.parametrize(
+        ("frame_hex", "expected"),
+        [
+            # B5 08:00:28 first-of-day
+            (
+                (
+                    "aa49ac00000000000805b5017e0038cd1d42667f7f0000000c00000000400f"
+                    "009000f2000000e000000040000000003c0028282f850e0066000000000020"
+                    "000800000000000000011d0b"
+                ),
+                {
+                    "power": True,
+                    "target_temperature": 26.0,
+                    "mode": 2,
+                    "fan_speed": 102,
+                    "indirect_wind": True,
+                    "indoor_humidity": 47,
+                    "indoor_temperature": 26.0,
+                },
+            ),
+            # B5 18:18:19 power-on
+            (
+                (
+                    "aa49ac00000000000805b5017e0038641da5647f7f0033000c00000000000f"
+                    "000000f2000000e000000040000000003c00282833850e0070070000000020"
+                    "00080000000000060001f8ba"
+                ),
+                {
+                    "power": True,
+                    "target_temperature": 26.0,
+                    "mode": 5,
+                    "fan_speed": 100,
+                    "indirect_wind": False,
+                    "indoor_humidity": 51,
+                    "indoor_temperature": 31.7,
+                },
+            ),
+            # B5 18:18:33 fan full
+            (
+                (
+                    "aa49ac00000000000805b5017e0038651da5647f7f0033000c00070000000f"
+                    "000000f2000000e000000040000000003c00282833850e0070070000000020"
+                    "00080000000000050001b5f6"
+                ),
+                {
+                    "power": True,
+                    "target_temperature": 26.0,
+                    "mode": 5,
+                    "fan_speed": 100,
+                    "indirect_wind": False,
+                    "indoor_humidity": 51,
+                    "indoor_temperature": 31.7,
+                },
+            ),
+            # B5 18:19:12 heat 30C
+            (
+                (
+                    "aa49ac00000000000805b5017e00386a2584667f7f0000000c00000000000f"
+                    "009000f2000000e000000040000000003c00282830860e0070070000000020"
+                    "00080000000000060001bdab"
+                ),
+                {
+                    "power": True,
+                    "target_temperature": 30.0,
+                    "mode": 4,
+                    "fan_speed": 102,
+                    "indirect_wind": False,
+                    "indoor_humidity": 48,
+                    "indoor_temperature": 31.7,
+                },
+            ),
+            # B5 12:07:06 power-off
+            (
+                (
+                    "aa49ac00000000000805b5017e0038d11c41667f7f0000000c00000000000f"
+                    "009000f0000000e000000040000000003c00282832810e0064090000000020"
+                    "00080000000000050036d553"
+                ),
+                {
+                    "power": False,
+                    "target_temperature": 26.0,
+                    "mode": 2,
+                    "fan_speed": 102,
+                    "indirect_wind": False,
+                    "indoor_humidity": 50,
+                    "indoor_temperature": 25.9,
+                },
+            ),
+            # B1 12:07:22 grid reply
+            (
+                (
+                    "aa73ac00000000000803b10942000001011800000100150000013217000001"
+                    "64330211004b000004002810000a0000016409000001007e000037a01c4166"
+                    "7f7f0000000c00000000000f009000f0000000e000000040000000003c0028"
+                    "2832810e006408000000002000080000000000000036cd"
+                ),
+                {
+                    "power": False,
+                    "target_temperature": 26.0,
+                    "mode": 2,
+                    "fan_speed": 102,
+                    "indoor_temperature": 25.8,
+                },
+            ),
+        ],
+    )
+    def test_message_new_protocol_0x7e_live_state(
+        self,
+        frame_hex: str,
+        expected: dict[str, object],
+    ) -> None:
+        """Test live state and dual-path temperatures from the 0x7e payload."""
+        response = MessageACResponse(bytearray.fromhex(frame_hex))
+        for attribute, value in expected.items():
+            assert hasattr(response, attribute)
+            assert getattr(response, attribute) == value
+
+    def test_message_new_protocol_0x7e_static_guards(self) -> None:
+        """Test static guards: implausible values are not written."""
+        # Real captured frame (see test_message_new_protocol_0x7e_live_state),
+        # with payload[1] set to a rejectable 43.5 C setpoint and payload[36]
+        # set to a rejectable humidity of 120.
+        frame = bytearray.fromhex(
+            "aa49ac00000000000805b5017e0038cd1d42667f7f0000000c00000000400f"
+            "009000f2000000e000000040000000003c0028282f850e0066000000000020"
+            "000800000000000000011d0b",
+        )
+        frame[16] = 0xFE  # payload[1] -> setpoint decodes to 43.5 C
+        frame[15 + 36] = 120  # payload[36] -> humidity above 100
+        response = MessageACResponse(frame)
+        assert hasattr(response, "power")
+        assert response.power is False  # bit 0 of 0xFE
+        assert hasattr(response, "mode")
+        assert response.mode == 2
+        assert hasattr(response, "fan_speed")
+        assert response.fan_speed == 102
+        assert hasattr(response, "indoor_temperature")
+        assert response.indoor_temperature == 26.0  # still in range
+        assert not hasattr(response, "target_temperature")  # 43.5 C rejected
+        assert not hasattr(response, "indoor_humidity")  # 120 rejected
+
     def test_message_query_c1_unknown_method(self) -> None:
         """Test Message parse query C1 with an unknown analysis method."""
         self.header[9] = 0x03
@@ -3266,8 +3407,16 @@ class TestMessageACResponse:
         assert not hasattr(response, "indoor_temperature")
         assert not hasattr(response, "outdoor_temperature")
 
-    def test_message_b5_notify2_0x7e_ignored_without_temperature_gate(self) -> None:
-        """Test the 0x7e tag is ignored without the model-specific gate."""
+    def test_message_b5_notify2_0x7e_dual_path_without_temperature_gate(self) -> None:
+        """Read 0x7e temperatures dual-path without the model-specific gate.
+
+        Deliberate successor of the previous "ignored without the gate"
+        policy: the 0x7e payload is an additional update source and no latch
+        flag is set, so the C0/A0/A1 paths keep updating and are never
+        suppressed — everything the old policy protected is preserved, plus
+        the earlier update the 0x7e frame provides. The latch-flag assertion
+        lives in the device-layer gated_by_model test.
+        """
         self.header[9] = 0x05
         body = bytearray(62)
         body[0] = 0xB5
@@ -3283,11 +3432,13 @@ class TestMessageACResponse:
 
         response = MessageACResponse(self.header + body)
 
-        # The payload decodes to in-range temperatures, so only the subtype
-        # gate keeps another model's unrelated 0x7e content out.
+        # Dual-path read: values are exposed, but no latch flag is set, so the
+        # C0/A0/A1 paths are never suppressed (contrast the gated model path).
         assert not hasattr(response, "has_new_protocol_temperature")
-        assert not hasattr(response, "target_temperature")
-        assert not hasattr(response, "indoor_temperature")
+        assert hasattr(response, "target_temperature")
+        assert response.target_temperature == 26.0
+        assert hasattr(response, "indoor_temperature")
+        assert response.indoor_temperature == 28.8
         assert not hasattr(response, "outdoor_temperature")
 
 

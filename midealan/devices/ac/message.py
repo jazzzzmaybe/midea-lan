@@ -109,6 +109,7 @@ NEW_PROTOCOL_MAX_VALID_TEMPERATURE = 40
 NEW_PROTOCOL_LEGACY_SETPOINT_BYTE = 3
 NEW_PROTOCOL_INDOOR_TEMPERATURE_BYTE = 40
 NEW_PROTOCOL_INDOOR_TEMPERATURE_DECIMAL_BYTE = 41
+NEW_PROTOCOL_INDOOR_TEMPERATURE_DECIMAL_MASK = 0x0F
 # Live degerming (sterilize) state rides the 0x7e new-protocol payload on
 # verified hardware: byte 19, bit 0x02. Reported in both B0/B1 bodies and B5
 # notify bodies, unlike self_clean whose B5 occurrence is only a capability
@@ -160,6 +161,31 @@ PROPERTIES_TIMER_SWITCH_OFF = 0x00
 # Live self-clean state is carried by the same payload (byte 8 bit 2).
 NEW_PROTOCOL_SELF_CLEAN_BYTE = 8
 NEW_PROTOCOL_SELF_CLEAN_MASK = 0x04
+# Live state bytes riding the same 0x7e new-protocol payload: power / mode /
+# fan-speed at bytes 1 / 2 / 3 (identical encoding to the C0/A0 state
+# bodies), indirect wind (prevent straight wind) at byte 14 bit 0x40 and
+# indoor humidity at byte 36. Verified against HA state history on model
+# 22019061, 2026-10-08 (59 notify frames plus B1/B5 reconciliation).
+NEW_PROTOCOL_POWER_BYTE = 1
+NEW_PROTOCOL_POWER_MASK = 0x01
+NEW_PROTOCOL_MODE_BYTE = 2
+NEW_PROTOCOL_MODE_MASK = 0xE0
+NEW_PROTOCOL_MODE_SHIFT = 5
+NEW_PROTOCOL_FAN_SPEED_BYTE = 3
+NEW_PROTOCOL_FAN_SPEED_MASK = 0x7F
+NEW_PROTOCOL_INDIRECT_WIND_BYTE = 14
+NEW_PROTOCOL_INDIRECT_WIND_MASK = 0x40
+NEW_PROTOCOL_INDOOR_HUMIDITY_BYTE = 36
+NEW_PROTOCOL_INDOOR_HUMIDITY_MAX = 100
+# Generic branch of the 0x7e temperature payload (identical encoding to the
+# XA0 state body): setpoint = bits 1-5 + 12.0 (+0.5 when bit 0x40 is set);
+# indoor temperature = bytes 40/41. Read dual-path: the C0/A0/A1 sources
+# keep updating these attributes as well (no latch).
+NEW_PROTOCOL_GENERIC_SETPOINT_MASK = 0x3E
+NEW_PROTOCOL_GENERIC_SETPOINT_SHIFT = 1
+NEW_PROTOCOL_GENERIC_SETPOINT_OFFSET = 12.0
+NEW_PROTOCOL_GENERIC_SETPOINT_HALF_DEGREE_BIT = 0x40
+NEW_PROTOCOL_GENERIC_SETPOINT_HALF_DEGREE_STEP = 0.5
 
 # X40 set packets carry low targets in a legacy extension byte.
 LOW_TARGET_TEMPERATURE_BOUNDARY = 17.0
@@ -1576,6 +1602,10 @@ class PropertiesBody(NewProtocolMessageBody):
                 new_protocol_data[NEW_PROTOCOL_SELF_CLEAN_BYTE]
                 & NEW_PROTOCOL_SELF_CLEAN_MASK
             ) > 0
+        # Tag presence and the 22013279 gate are handled inside the helper;
+        # the call stays unconditional to keep this method within the
+        # complexity budget.
+        self._parse_new_protocol_extensions(params, new_protocol_temperature)
         if (
             CapabilityTag.ieco in params
             and self.body_type != ListTypes.B5
@@ -1595,6 +1625,76 @@ class PropertiesBody(NewProtocolMessageBody):
             )
         ):
             self.has_new_protocol_temperature = True
+
+    def _parse_new_protocol_extensions(
+        self,
+        params: dict[int, bytearray],
+        new_protocol_temperature: bool,
+    ) -> None:
+        """Read live state and generic-branch temperatures from the 0x7e payload.
+
+        Live power, mode, fan speed, indirect wind and indoor humidity ride the
+        same 0x7e payload (same encoding as the C0/A0 state bodies; verified
+        against HA state history on model 22019061, 2026-10-08). The generic
+        temperature branch (bytes 1, 40, 41; same encodings as XA0Body) is
+        dual-path: it does not set has_new_protocol_temperature, so the
+        C0/A0/A1 sources keep updating and are never suppressed. This is
+        skipped entirely for the 22013279 new-protocol-temperature path,
+        where byte-1 encoding is known to differ.
+        """
+        if new_protocol_temperature or NEW_PROTOCOL_TEMPERATURE_TAG not in params:
+            return
+        data = params[NEW_PROTOCOL_TEMPERATURE_TAG]
+        if len(data) > NEW_PROTOCOL_INDOOR_HUMIDITY_BYTE:
+            self.power = (data[NEW_PROTOCOL_POWER_BYTE] & NEW_PROTOCOL_POWER_MASK) > 0
+            self.mode = (
+                data[NEW_PROTOCOL_MODE_BYTE] & NEW_PROTOCOL_MODE_MASK
+            ) >> NEW_PROTOCOL_MODE_SHIFT
+            self.fan_speed = (
+                data[NEW_PROTOCOL_FAN_SPEED_BYTE] & NEW_PROTOCOL_FAN_SPEED_MASK
+            )
+            self.indirect_wind = (
+                data[NEW_PROTOCOL_INDIRECT_WIND_BYTE] & NEW_PROTOCOL_INDIRECT_WIND_MASK
+            ) > 0
+            indoor_humidity = data[NEW_PROTOCOL_INDOOR_HUMIDITY_BYTE]
+            if indoor_humidity == 0:
+                # Library convention: 0 = no reading reported.
+                self.indoor_humidity = None
+            elif indoor_humidity <= NEW_PROTOCOL_INDOOR_HUMIDITY_MAX:
+                self.indoor_humidity = indoor_humidity
+            # Values above the bound are implausible: skip, keep the last value.
+        if len(data) > NEW_PROTOCOL_INDOOR_TEMPERATURE_DECIMAL_BYTE:
+            raw_setpoint = data[NEW_PROTOCOL_POWER_BYTE]
+            target_temperature = (
+                (
+                    (raw_setpoint & NEW_PROTOCOL_GENERIC_SETPOINT_MASK)
+                    >> NEW_PROTOCOL_GENERIC_SETPOINT_SHIFT
+                )
+                + NEW_PROTOCOL_GENERIC_SETPOINT_OFFSET
+                + (
+                    NEW_PROTOCOL_GENERIC_SETPOINT_HALF_DEGREE_STEP
+                    if raw_setpoint & NEW_PROTOCOL_GENERIC_SETPOINT_HALF_DEGREE_BIT
+                    else 0.0
+                )
+            )
+            indoor_temperature = XMessageBody.parse_temperature(
+                data[NEW_PROTOCOL_INDOOR_TEMPERATURE_BYTE],
+                data[NEW_PROTOCOL_INDOOR_TEMPERATURE_DECIMAL_BYTE]
+                & NEW_PROTOCOL_INDOOR_TEMPERATURE_DECIMAL_MASK,
+            )
+            if (
+                NEW_PROTOCOL_MIN_VALID_TEMPERATURE
+                <= target_temperature
+                <= NEW_PROTOCOL_MAX_VALID_TEMPERATURE
+            ):
+                self.target_temperature = target_temperature
+            if (
+                indoor_temperature is not None
+                and NEW_PROTOCOL_MIN_VALID_TEMPERATURE
+                <= indoor_temperature
+                <= NEW_PROTOCOL_MAX_VALID_TEMPERATURE
+            ):
+                self.indoor_temperature = indoor_temperature
 
     def _parse_new_protocol_temperatures(self, data: bytearray) -> bool:
         """Decode setpoint and indoor temperature for model 22013279.
