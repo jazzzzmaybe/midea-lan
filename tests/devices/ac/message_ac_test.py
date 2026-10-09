@@ -2634,12 +2634,29 @@ class TestMessageACResponse:
         header[1] = len(header) + len(body)
         frame = header + body
         frame.append(MessageBase.checksum(frame[1:]))
-        response = MessageACResponse(bytes(frame))
+        response = MessageACResponse(frame)
         assert not hasattr(response, "swing_vertical")
         assert not hasattr(response, "wind_lr_angle")
         assert not hasattr(response, "power")
         assert not hasattr(response, "indoor_humidity")
         assert not hasattr(response, "target_temperature")
+
+    def test_message_new_protocol_0x7e_humidity_keeps_tag_reading(self) -> None:
+        """Test a zero 0x7e humidity byte keeps the queried tag reading."""
+        body = bytearray([0xB1, 0x02])  # two properties
+        tag = CapabilityTag.indoor_humidity
+        body += bytearray([tag & 0xFF, tag >> 8, 0x00, 0x01, 0x34])  # 52 %
+        body += bytearray([0x7E, 0x00, 0x00, 0x38])  # 0x7e reply, 56 bytes
+        payload = bytearray(56)
+        payload[36] = 0x00  # humidity: no reading in the 0x7e payload
+        body += payload
+        header = bytearray([0xAA, 0, 0xAC, 0, 0, 0, 0, 0, 1, 3])
+        header[1] = len(header) + len(body)
+        frame = header + body
+        frame.append(MessageBase.checksum(frame[1:]))
+        response = MessageACResponse(frame)
+        assert hasattr(response, "indoor_humidity")
+        assert response.indoor_humidity == 0x34
 
     def test_message_query_c1_unknown_method(self) -> None:
         """Test Message parse query C1 with an unknown analysis method."""

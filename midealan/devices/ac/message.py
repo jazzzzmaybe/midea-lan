@@ -1710,8 +1710,10 @@ class PropertiesBody(NewProtocolMessageBody):
             ) > 0
             indoor_humidity = data[NEW_PROTOCOL_INDOOR_HUMIDITY_BYTE]
             if indoor_humidity == 0:
-                # Library convention: 0 = no reading reported.
-                self.indoor_humidity = None
+                # Library convention: 0 = no reading reported. Preserve any
+                # reading the capability tag already provided in this frame.
+                if not hasattr(self, "indoor_humidity"):
+                    self.indoor_humidity = None
             elif indoor_humidity <= NEW_PROTOCOL_INDOOR_HUMIDITY_MAX:
                 self.indoor_humidity = indoor_humidity
             # Values above the bound are implausible: skip, keep the last value.
