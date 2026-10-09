@@ -1378,6 +1378,17 @@ class TestMideaACDevice:
         assert status[DeviceAttributes.indoor_temperature.value] == 28.8
         assert not other._prefer_new_protocol_temperature
 
+        # A later C0 response still updates the C0-sourced temperatures -
+        # including the outdoor reading the 0x7e payload never carries -
+        # because reading 0x7e temperatures on this model does not latch.
+        status = other.process_message(
+            self._response(bytearray(MODEL_220F4047_C0_BODY)),
+        )
+        assert status[DeviceAttributes.target_temperature.value] == 16.5
+        assert status[DeviceAttributes.indoor_temperature.value] == -2.3
+        assert status[DeviceAttributes.outdoor_temperature.value] == -9.0
+        assert not other._prefer_new_protocol_temperature
+
     def test_power_saving_control(self) -> None:
         """Test power saving control and preset exclusivity."""
         with patch.object(self.device, "build_send") as mock_build_send:

@@ -2579,6 +2579,19 @@ class TestMessageACResponse:
         assert not hasattr(response, "target_temperature")  # 43.5 C rejected
         assert not hasattr(response, "indoor_humidity")  # 120 rejected
 
+        # payload[40] = 0xFF marks the indoor temperature as unavailable;
+        # the setpoint still lands while the indoor reading is skipped.
+        frame = bytearray.fromhex(
+            "aa49ac00000000000805b5017e0038cd1d42667f7f0000000c00000000400f"
+            "009000f2000000e000000040000000003c0028282f850e0066000000000020"
+            "000800000000000000011d0b",
+        )
+        frame[15 + 40] = 0xFF  # payload[40] -> indoor temperature unavailable
+        response = MessageACResponse(frame)
+        assert hasattr(response, "target_temperature")
+        assert response.target_temperature == 26.0
+        assert not hasattr(response, "indoor_temperature")
+
     def test_message_new_protocol_0x7e_angle_grade_guard(self) -> None:
         """Test louver nibbles without a library grade are not written."""
         # Real B5 notify frame (18:18:33.539) with payload[17] rewritten to
@@ -2597,6 +2610,36 @@ class TestMessageACResponse:
         assert not hasattr(response, "wind_lr_angle")  # grade 13 skipped
         assert hasattr(response, "wind_ud_angle")
         assert response.wind_ud_angle == 1
+
+        # The same guard applies per nibble: with lr nibble 1 (a valid grade)
+        # and ud nibble 2 (grade 13, not expressible), only the ud angle is
+        # skipped.
+        frame[frame.find(b"\x7e") + 3 + NEW_PROTOCOL_WIND_ANGLE_BYTE] = 0x12
+        response = MessageACResponse(frame)
+        assert hasattr(response, "wind_lr_angle")
+        assert response.wind_lr_angle == 1
+        assert not hasattr(response, "wind_ud_angle")  # grade 13 skipped
+
+    def test_message_new_protocol_0x7e_short_payload_skips_sections(self) -> None:
+        """Test a short 0x7e payload is rejected by the length guards."""
+        body = bytearray(20)
+        body[0] = 0xB1  # a notify2 response carrying a single property
+        body[1] = 0x01  # one property
+        body[2] = 0x7E
+        body[3] = 0x00
+        body[4] = 0x00
+        body[5] = 0x0A  # payload length: 10, shorter than every field index
+        body[6:16] = b"\x00" * 10
+        header = bytearray([0xAA, 0, 0xAC, 0, 0, 0, 0, 0, 1, 3])
+        header[1] = len(header) + len(body)
+        frame = header + body
+        frame.append(MessageBase.checksum(frame[1:]))
+        response = MessageACResponse(bytes(frame))
+        assert not hasattr(response, "swing_vertical")
+        assert not hasattr(response, "wind_lr_angle")
+        assert not hasattr(response, "power")
+        assert not hasattr(response, "indoor_humidity")
+        assert not hasattr(response, "target_temperature")
 
     def test_message_query_c1_unknown_method(self) -> None:
         """Test Message parse query C1 with an unknown analysis method."""
