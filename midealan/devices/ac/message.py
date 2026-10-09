@@ -109,6 +109,7 @@ NEW_PROTOCOL_MAX_VALID_TEMPERATURE = 40
 NEW_PROTOCOL_LEGACY_SETPOINT_BYTE = 3
 NEW_PROTOCOL_INDOOR_TEMPERATURE_BYTE = 40
 NEW_PROTOCOL_INDOOR_TEMPERATURE_DECIMAL_BYTE = 41
+NEW_PROTOCOL_INDOOR_TEMPERATURE_DECIMAL_MASK = 0x0F
 # Live degerming (sterilize) state rides the 0x7e new-protocol payload on
 # verified hardware: byte 19, bit 0x02. Reported in both B0/B1 bodies and B5
 # notify bodies, unlike self_clean whose B5 occurrence is only a capability
@@ -160,6 +161,64 @@ PROPERTIES_TIMER_SWITCH_OFF = 0x00
 # Live self-clean state is carried by the same payload (byte 8 bit 2).
 NEW_PROTOCOL_SELF_CLEAN_BYTE = 8
 NEW_PROTOCOL_SELF_CLEAN_MASK = 0x04
+# Live state bytes riding the same 0x7e new-protocol payload: power / mode /
+# fan-speed at bytes 1 / 2 / 3 (identical encoding to the C0/A0 state
+# bodies), indirect wind (prevent straight wind) at byte 14 bit 0x40 and
+# indoor humidity at byte 36. Verified against HA state history on model
+# 22019061, 2026-10-08 (59 notify frames plus B1/B5 reconciliation).
+NEW_PROTOCOL_POWER_BYTE = 1
+NEW_PROTOCOL_POWER_MASK = 0x01
+NEW_PROTOCOL_MODE_BYTE = 2
+NEW_PROTOCOL_MODE_MASK = 0xE0
+NEW_PROTOCOL_MODE_SHIFT = 5
+NEW_PROTOCOL_FAN_SPEED_BYTE = 3
+NEW_PROTOCOL_FAN_SPEED_MASK = 0x7F
+NEW_PROTOCOL_INDIRECT_WIND_BYTE = 14
+NEW_PROTOCOL_INDIRECT_WIND_MASK = 0x40
+NEW_PROTOCOL_INDOOR_HUMIDITY_BYTE = 36
+NEW_PROTOCOL_INDOOR_HUMIDITY_MAX = 100
+# Live swing flags and fixed louver angles ride the same 0x7e payload: the
+# swing flags share the bit layout of the XA0/State bodies (byte 7: vertical
+# 0x0C / horizontal 0x03) and the louver angles sit in byte 17 (high nibble =
+# left-right, low nibble = up-down). The vendor Lua maps angle nibbles 2-9
+# onto the 100-based grades {13, 25, 38, 50, 62, 75, 88, 100}; nibbles 0/1
+# pass through unchanged. Only grades that the library angle maps
+# (_wind_lr_angles / _wind_ud_angles) can express are written; the
+# intermediate grades are skipped. Verified against the vendor Lua
+# read-side segments of models 22019061 / 22019053 (swing flags at
+# cursor+11; louver angles at cursor+21, plus a same-table direct-index
+# variant) and HA state history on model 22019061, 2026-10-08.
+NEW_PROTOCOL_SWING_BYTE = 7
+NEW_PROTOCOL_SWING_VERTICAL_MASK = 0x0C
+NEW_PROTOCOL_SWING_HORIZONTAL_MASK = 0x03
+NEW_PROTOCOL_WIND_ANGLE_BYTE = 17
+NEW_PROTOCOL_WIND_LR_ANGLE_SHIFT = 4
+NEW_PROTOCOL_WIND_UD_ANGLE_MASK = 0x0F
+NEW_PROTOCOL_WIND_ANGLE_GRADES: dict[int, int] = {
+    0: 0,
+    1: 1,
+    2: 13,
+    3: 25,
+    4: 38,
+    5: 50,
+    6: 62,
+    7: 75,
+    8: 88,
+    9: 100,
+}
+# Mirrors the keys of MideaACDevice._wind_lr_angles / _wind_ud_angles.
+NEW_PROTOCOL_WIND_ANGLE_LIB_GRADES: frozenset[int] = frozenset(
+    {0, 1, 25, 50, 75, 100},
+)
+# Generic branch of the 0x7e temperature payload (identical encoding to the
+# XA0 state body): setpoint = bits 1-5 + 12.0 (+0.5 when bit 0x40 is set);
+# indoor temperature = bytes 40/41. Read dual-path: the C0/A0/A1 sources
+# keep updating these attributes as well (no latch).
+NEW_PROTOCOL_GENERIC_SETPOINT_MASK = 0x3E
+NEW_PROTOCOL_GENERIC_SETPOINT_SHIFT = 1
+NEW_PROTOCOL_GENERIC_SETPOINT_OFFSET = 12.0
+NEW_PROTOCOL_GENERIC_SETPOINT_HALF_DEGREE_BIT = 0x40
+NEW_PROTOCOL_GENERIC_SETPOINT_HALF_DEGREE_STEP = 0.5
 
 # X40 set packets carry low targets in a legacy extension byte.
 LOW_TARGET_TEMPERATURE_BOUNDARY = 17.0
@@ -1576,6 +1635,10 @@ class PropertiesBody(NewProtocolMessageBody):
                 new_protocol_data[NEW_PROTOCOL_SELF_CLEAN_BYTE]
                 & NEW_PROTOCOL_SELF_CLEAN_MASK
             ) > 0
+        # Tag presence and the 22013279 gate are handled inside the helper;
+        # the call stays unconditional to keep this method within the
+        # complexity budget.
+        self._parse_new_protocol_extensions(params, new_protocol_temperature)
         if (
             CapabilityTag.ieco in params
             and self.body_type != ListTypes.B5
@@ -1595,6 +1658,97 @@ class PropertiesBody(NewProtocolMessageBody):
             )
         ):
             self.has_new_protocol_temperature = True
+
+    def _parse_new_protocol_extensions(
+        self,
+        params: dict[int, bytearray],
+        new_protocol_temperature: bool,
+    ) -> None:
+        """Read live state and generic-branch temperatures from the 0x7e payload.
+
+        Live power, mode, fan speed, indirect wind, indoor humidity, swing
+        flags and fixed louver angles ride the same 0x7e payload (same
+        encoding as the C0/A0 state bodies; swing/angle encoding verified
+        against the vendor Lua and HA state history on model 22019061,
+        2026-10-08). The generic temperature branch (bytes 1, 40, 41; same
+        encodings as XA0Body) is dual-path: it does not set
+        has_new_protocol_temperature, so the C0/A0/A1 sources keep updating
+        and are never suppressed. This is skipped entirely for the 22013279
+        new-protocol-temperature path, where byte-1 encoding is known to
+        differ.
+        """
+        if new_protocol_temperature or NEW_PROTOCOL_TEMPERATURE_TAG not in params:
+            return
+        data = params[NEW_PROTOCOL_TEMPERATURE_TAG]
+        if len(data) > NEW_PROTOCOL_WIND_ANGLE_BYTE:
+            self.swing_vertical = (
+                data[NEW_PROTOCOL_SWING_BYTE] & NEW_PROTOCOL_SWING_VERTICAL_MASK
+            ) > 0
+            self.swing_horizontal = (
+                data[NEW_PROTOCOL_SWING_BYTE] & NEW_PROTOCOL_SWING_HORIZONTAL_MASK
+            ) > 0
+            lr_grade = NEW_PROTOCOL_WIND_ANGLE_GRADES.get(
+                data[NEW_PROTOCOL_WIND_ANGLE_BYTE] >> NEW_PROTOCOL_WIND_LR_ANGLE_SHIFT,
+            )
+            if lr_grade in NEW_PROTOCOL_WIND_ANGLE_LIB_GRADES:
+                self.wind_lr_angle = lr_grade
+            ud_grade = NEW_PROTOCOL_WIND_ANGLE_GRADES.get(
+                data[NEW_PROTOCOL_WIND_ANGLE_BYTE] & NEW_PROTOCOL_WIND_UD_ANGLE_MASK,
+            )
+            if ud_grade in NEW_PROTOCOL_WIND_ANGLE_LIB_GRADES:
+                self.wind_ud_angle = ud_grade
+        if len(data) > NEW_PROTOCOL_INDOOR_HUMIDITY_BYTE:
+            self.power = (data[NEW_PROTOCOL_POWER_BYTE] & NEW_PROTOCOL_POWER_MASK) > 0
+            self.mode = (
+                data[NEW_PROTOCOL_MODE_BYTE] & NEW_PROTOCOL_MODE_MASK
+            ) >> NEW_PROTOCOL_MODE_SHIFT
+            self.fan_speed = (
+                data[NEW_PROTOCOL_FAN_SPEED_BYTE] & NEW_PROTOCOL_FAN_SPEED_MASK
+            )
+            self.indirect_wind = (
+                data[NEW_PROTOCOL_INDIRECT_WIND_BYTE] & NEW_PROTOCOL_INDIRECT_WIND_MASK
+            ) > 0
+            indoor_humidity = data[NEW_PROTOCOL_INDOOR_HUMIDITY_BYTE]
+            if indoor_humidity == 0:
+                # Library convention: 0 = no reading reported. Preserve any
+                # reading the capability tag already provided in this frame.
+                if not hasattr(self, "indoor_humidity"):
+                    self.indoor_humidity = None
+            elif indoor_humidity <= NEW_PROTOCOL_INDOOR_HUMIDITY_MAX:
+                self.indoor_humidity = indoor_humidity
+            # Values above the bound are implausible: skip, keep the last value.
+        if len(data) > NEW_PROTOCOL_INDOOR_TEMPERATURE_DECIMAL_BYTE:
+            raw_setpoint = data[NEW_PROTOCOL_POWER_BYTE]
+            target_temperature = (
+                (
+                    (raw_setpoint & NEW_PROTOCOL_GENERIC_SETPOINT_MASK)
+                    >> NEW_PROTOCOL_GENERIC_SETPOINT_SHIFT
+                )
+                + NEW_PROTOCOL_GENERIC_SETPOINT_OFFSET
+                + (
+                    NEW_PROTOCOL_GENERIC_SETPOINT_HALF_DEGREE_STEP
+                    if raw_setpoint & NEW_PROTOCOL_GENERIC_SETPOINT_HALF_DEGREE_BIT
+                    else 0.0
+                )
+            )
+            indoor_temperature = XMessageBody.parse_temperature(
+                data[NEW_PROTOCOL_INDOOR_TEMPERATURE_BYTE],
+                data[NEW_PROTOCOL_INDOOR_TEMPERATURE_DECIMAL_BYTE]
+                & NEW_PROTOCOL_INDOOR_TEMPERATURE_DECIMAL_MASK,
+            )
+            if (
+                NEW_PROTOCOL_MIN_VALID_TEMPERATURE
+                <= target_temperature
+                <= NEW_PROTOCOL_MAX_VALID_TEMPERATURE
+            ):
+                self.target_temperature = target_temperature
+            if (
+                indoor_temperature is not None
+                and NEW_PROTOCOL_MIN_VALID_TEMPERATURE
+                <= indoor_temperature
+                <= NEW_PROTOCOL_MAX_VALID_TEMPERATURE
+            ):
+                self.indoor_temperature = indoor_temperature
 
     def _parse_new_protocol_temperatures(self, data: bytearray) -> bool:
         """Decode setpoint and indoor temperature for model 22013279.

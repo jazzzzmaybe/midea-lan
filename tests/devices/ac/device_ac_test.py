@@ -1356,7 +1356,7 @@ class TestMideaACDevice:
         return bytes(frame)
 
     def test_process_message_0x7e_temperatures_are_gated_by_model(self) -> None:
-        """Only model 22013279 takes temperatures from the 0x7e tag."""
+        """22013279 latches 0x7e temperatures; other models read dual-path."""
         frame = self._new_protocol_temperature_response()
 
         # The gate is deliberately model-only, including subtype 1 which was
@@ -1368,12 +1368,25 @@ class TestMideaACDevice:
             assert status[DeviceAttributes.indoor_temperature.value] == 28.8
             assert device._prefer_new_protocol_temperature
 
-        # The known 22251759 / 32773 device keeps its C0 temperatures, which
-        # include an outdoor reading not available from the 0x7e response.
+        # The known 22251759 / 32773 device reads the 0x7e temperatures
+        # dual-path: they are exposed as an additional update source, but no
+        # latch is set, so its C0 temperatures (including the outdoor reading
+        # not available from the 0x7e response) keep updating as well.
         other = self._make_device("22251759", 32773)
         status = other.process_message(frame)
-        assert DeviceAttributes.target_temperature.value not in status
-        assert DeviceAttributes.indoor_temperature.value not in status
+        assert status[DeviceAttributes.target_temperature.value] == 26.0
+        assert status[DeviceAttributes.indoor_temperature.value] == 28.8
+        assert not other._prefer_new_protocol_temperature
+
+        # A later C0 response still updates the C0-sourced temperatures -
+        # including the outdoor reading the 0x7e payload never carries -
+        # because reading 0x7e temperatures on this model does not latch.
+        status = other.process_message(
+            self._response(bytearray(MODEL_220F4047_C0_BODY)),
+        )
+        assert status[DeviceAttributes.target_temperature.value] == 16.5
+        assert status[DeviceAttributes.indoor_temperature.value] == -2.3
+        assert status[DeviceAttributes.outdoor_temperature.value] == -9.0
         assert not other._prefer_new_protocol_temperature
 
     def test_power_saving_control(self) -> None:
