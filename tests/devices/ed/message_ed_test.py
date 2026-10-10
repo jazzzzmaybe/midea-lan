@@ -1223,6 +1223,20 @@ class TestEDMessageBodyFFWaterPurifier:
         assert not message.no_obsolete_water
         assert message.smart_no_obsolete_water
 
+    def test_antifreeze_single_byte_record_skips_smart_flag(self) -> None:
+        """Decode a 0x03C record carrying a single payload byte.
+
+        The smart zero-stagnant-water bit lives in the optional second
+        payload byte; a shorter record must still decode the antifreeze bit
+        without reading past the record.
+        """
+        message = EDMessageBodyFF(
+            body=bytearray([0xFF, 0x01, 0x00, 0x3C, 0x10, 0x01]),
+        )
+        assert message.antifreeze
+        assert not message.no_obsolete_water
+        assert not hasattr(message, "smart_no_obsolete_water")
+
     def test_short_extended_records_are_skipped(self) -> None:
         """Skip extended records whose payload misses their fields."""
         # The 0x002 record declares two payload bytes instead of four.
