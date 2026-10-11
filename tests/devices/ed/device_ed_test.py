@@ -231,8 +231,16 @@ class TestMideaEDDevice:
 
         assert self.device.attributes[DeviceAttributes.heat] is False
 
+    def test_cur_quantify_without_report_does_not_send(self) -> None:
+        """Do not infer faucet gear capability from initialized attributes."""
+        with patch.object(self.device, "build_send") as mock_build_send:
+            self.device.set_attribute(DeviceAttributes.cur_quantify, 22)
+        mock_build_send.assert_not_called()
+        assert self.device.attributes[DeviceAttributes.cur_quantify] is None
+
     def test_set_attribute_cur_quantify_uses_official_lua_command(self) -> None:
         """Test the faucet gear write uses the official Lua encoding."""
+        self.test_process_message_water_purifier_frame()
         with patch.object(self.device, "build_send") as mock_build_send:
             self.device.set_attribute(DeviceAttributes.cur_quantify, 22)
             message = mock_build_send.call_args.args[0]
@@ -246,9 +254,9 @@ class TestMideaEDDevice:
                 [0x15, 0x01, 0x01, 0x0D, 0x02, 0x00, 0x00, 0x00],
             )
 
-        assert self.device.attributes[DeviceAttributes.cur_quantify] is None
+        assert self.device.attributes[DeviceAttributes.cur_quantify] == 21
 
-    @pytest.mark.parametrize("previous_value", [None, 21])
+    @pytest.mark.parametrize("previous_value", [0, 21])
     def test_set_attribute_cur_quantify_preserves_reported_state(
         self,
         previous_value: int | None,
@@ -375,6 +383,7 @@ class TestMideaEDDevice:
 
     def test_set_attribute_cur_quantify_validates_values(self) -> None:
         """Reject wrong-typed faucet gear values before sending."""
+        self.test_process_message_water_purifier_frame()
         with pytest.raises(ValueWrongType):
             self.device.set_attribute(DeviceAttributes.cur_quantify, True)
         with pytest.raises(ValueWrongType):
@@ -388,6 +397,102 @@ class TestMideaEDDevice:
             self.device.set_attribute(DeviceAttributes.cur_quantify, 21.0)
             self.device.set_attribute(DeviceAttributes.cur_quantify, 0)
             assert mock_build_send.call_count == 3
+
+    @pytest.mark.parametrize(
+        ("raw_frame", "reported_value"),
+        [
+            (
+                (
+                    "aa69ed00000000000004ff01030040088201030110000240010000001050563b0000001150"
+                    "00c31e00001340730005002030000200236000000000001538a02c01f401e803000000003a"
+                    "40000000003b105252100316503c180000003c5041400000000712230f120014"
+                ),
+                21,
+            ),
+            (
+                (
+                    "aa69ed00000000000004ff01030040088243010110000240010000001050563b0000001150"
+                    "00c31e00001340740004002030000200236000000000001638a02c01f401e803000000003a"
+                    "40000000003b105852100316503c180000003c5041400000000712220f1200ce"
+                ),
+                22,
+            ),
+            (
+                (
+                    "aa69ed00000000000003ff0103004008820103011000024003000000105054380000001150"
+                    "a8840f00001340770004002030000200236000000000000038a02c01f401e803000000003a"
+                    "40000000003b105652100316503c180000003c50414000000007122c0f1200c3"
+                ),
+                0,
+            ),
+        ],
+    )
+    def test_cur_quantify_report_enables_writes(
+        self,
+        raw_frame: str,
+        reported_value: int,
+    ) -> None:
+        """A captured gear report enables writes, including a zero report."""
+        assert self.device.attributes[DeviceAttributes.cur_quantify] is None
+        status = self.device.process_message(bytes.fromhex(raw_frame))
+        assert status[DeviceAttributes.cur_quantify] == reported_value
+        with patch.object(self.device, "build_send") as mock_build_send:
+            self.device.set_attribute(DeviceAttributes.cur_quantify, 24)
+        mock_build_send.assert_called_once()
+        assert self.device.attributes[DeviceAttributes.cur_quantify] == reported_value
+
+    @pytest.mark.parametrize(
+        "raw_frame",
+        [
+            "aa0ded00000000000002150100ee",
+            "aa12ed00000000000003ff010023300000000000",
+        ],
+    )
+    def test_cur_quantify_missing_report_does_not_enable_writes(
+        self,
+        raw_frame: str,
+    ) -> None:
+        """A synthetic ACK or short quantify record cannot enable writes."""
+        status = self.device.process_message(bytes.fromhex(raw_frame))
+        assert DeviceAttributes.cur_quantify not in status
+        with patch.object(self.device, "build_send") as mock_build_send:
+            self.device.set_attribute(DeviceAttributes.cur_quantify, 22)
+        mock_build_send.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("model", "subtype"),
+        [("632009EN", 0), ("63000622", 395), ("6360000A", 703)],
+    )
+    def test_cur_quantify_model_alone_does_not_enable_writes(
+        self,
+        model: str,
+        subtype: int,
+    ) -> None:
+        """Neither a purifier identity nor another ED subtype grants writes."""
+        device = MideaEDDevice(
+            name="Unreported device",
+            device_id=2,
+            ip_address="192.0.2.1",
+            port=6444,
+            token=TEST_AUTH_VALUE,
+            key="BB",
+            device_protocol=ProtocolVersion.V3,
+            model=model,
+            subtype=subtype,
+            customize="",
+        )
+        with patch.object(device, "build_send") as mock_build_send:
+            device.set_attribute(DeviceAttributes.cur_quantify, 0)
+        mock_build_send.assert_not_called()
+
+    def test_cur_quantify_report_survives_reconnect_reset(self) -> None:
+        """Reconnect retains a report in this instance without disk caching."""
+        self.test_process_message_water_purifier_frame()
+        self.device.close_socket()
+        with patch.object(self.device, "build_send") as mock_build_send:
+            self.device.set_attribute(DeviceAttributes.cur_quantify, 0)
+        mock_build_send.assert_called_once()
+        assert self.device.attributes[DeviceAttributes.cur_quantify] == 21
 
     def test_set_attribute_water_purifier_group_data_is_read_only(self) -> None:
         """Test read-only purifier group data never emits a set command."""

@@ -487,6 +487,24 @@ class MideaEDDevice(MideaDevice):
             )
             raise ValueError(msg)
 
+    @staticmethod
+    def _validate_cur_quantify(value: bool | float | str) -> None:
+        """Validate a requested faucet gear independently of observed capability."""
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ValueWrongType("[ed] Expected int")
+        if isinstance(value, float) and not value.is_integer():
+            msg = "cur_quantify must be a whole number"
+            raise ValueError(msg)
+        if value != CUR_QUANTIFY_CONTINUOUS and not (
+            CUR_QUANTIFY_MIN_SLOT <= value <= CUR_QUANTIFY_MAX_SLOT
+        ):
+            msg = (
+                "cur_quantify must be "
+                f"{CUR_QUANTIFY_CONTINUOUS} (continuous) or a preset slot "
+                f"{CUR_QUANTIFY_MIN_SLOT}-{CUR_QUANTIFY_MAX_SLOT}"
+            )
+            raise ValueError(msg)
+
     def set_attribute(self, attr: str, value: bool | float | str) -> None:
         """Midea ED device set attribute."""
         if self._set_tea_bar_attribute(attr, value):
@@ -498,20 +516,11 @@ class MideaEDDevice(MideaDevice):
         ] and not isinstance(value, bool):
             raise ValueWrongType("[ed] Expected bool")
         if attr == DeviceAttributes.cur_quantify:
-            if isinstance(value, bool) or not isinstance(value, int | float):
-                raise ValueWrongType("[ed] Expected int")
-            if isinstance(value, float) and not value.is_integer():
-                msg = "cur_quantify must be a whole number"
-                raise ValueError(msg)
-            if value != CUR_QUANTIFY_CONTINUOUS and not (
-                CUR_QUANTIFY_MIN_SLOT <= value <= CUR_QUANTIFY_MAX_SLOT
-            ):
-                msg = (
-                    "cur_quantify must be "
-                    f"{CUR_QUANTIFY_CONTINUOUS} (continuous) or a preset slot "
-                    f"{CUR_QUANTIFY_MIN_SLOT}-{CUR_QUANTIFY_MAX_SLOT}"
-                )
-                raise ValueError(msg)
+            self._validate_cur_quantify(value)
+            # A non-None value records an observed gear report, including zero.
+            # Do not infer capability from the initialized attribute alone.
+            if self._attributes.get(DeviceAttributes.cur_quantify) is None:
+                return
         message: MessageNewSet | MessageOldSet | None = None
         if self._use_new_set():
             if attr in [
