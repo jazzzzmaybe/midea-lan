@@ -36,6 +36,12 @@ TEA_BAR_MAX_KEEP_WARM_HOURS = 12.0
 TEA_BAR_DEFAULT_KEEP_WARM_HOURS = 12.0
 TEA_BAR_MODEL = "63000622"
 
+# cur_quantify faucet gear value domain: 0 selects the continuous mode,
+# 21-25 select the preset slots that quantify_21..quantify_25 define.
+CUR_QUANTIFY_CONTINUOUS = 0
+CUR_QUANTIFY_MIN_SLOT = 21
+CUR_QUANTIFY_MAX_SLOT = 25
+
 
 class DeviceAttributes(StrEnum):
     """Midea ED device attributes."""
@@ -491,6 +497,21 @@ class MideaEDDevice(MideaDevice):
             DeviceAttributes.heat,
         ] and not isinstance(value, bool):
             raise ValueWrongType("[ed] Expected bool")
+        if attr == DeviceAttributes.cur_quantify:
+            if isinstance(value, bool) or not isinstance(value, int | float):
+                raise ValueWrongType("[ed] Expected int")
+            if isinstance(value, float) and not value.is_integer():
+                msg = "cur_quantify must be a whole number"
+                raise ValueError(msg)
+            if value != CUR_QUANTIFY_CONTINUOUS and not (
+                CUR_QUANTIFY_MIN_SLOT <= value <= CUR_QUANTIFY_MAX_SLOT
+            ):
+                msg = (
+                    "cur_quantify must be "
+                    f"{CUR_QUANTIFY_CONTINUOUS} (continuous) or a preset slot "
+                    f"{CUR_QUANTIFY_MIN_SLOT}-{CUR_QUANTIFY_MAX_SLOT}"
+                )
+                raise ValueError(msg)
         message: MessageNewSet | MessageOldSet | None = None
         if self._use_new_set():
             if attr in [
@@ -499,6 +520,7 @@ class MideaEDDevice(MideaDevice):
                 DeviceAttributes.wash,
                 DeviceAttributes.antifreeze,
                 DeviceAttributes.heat,
+                DeviceAttributes.cur_quantify,
                 DeviceAttributes.soften,
                 DeviceAttributes.cl_sterilization,
                 DeviceAttributes.leak_water_protection,

@@ -231,6 +231,39 @@ class TestMideaEDDevice:
 
         assert self.device.attributes[DeviceAttributes.heat] is False
 
+    def test_set_attribute_cur_quantify_uses_official_lua_command(self) -> None:
+        """Test the faucet gear write uses the official Lua encoding."""
+        with patch.object(self.device, "build_send") as mock_build_send:
+            self.device.set_attribute(DeviceAttributes.cur_quantify, 22)
+            message = mock_build_send.call_args.args[0]
+            assert message.body == bytearray(
+                [0x15, 0x01, 0x01, 0x0D, 0x02, 0x16, 0x00, 0x00],
+            )
+
+            self.device.set_attribute(DeviceAttributes.cur_quantify, 0)
+            message = mock_build_send.call_args.args[0]
+            assert message.body == bytearray(
+                [0x15, 0x01, 0x01, 0x0D, 0x02, 0x00, 0x00, 0x00],
+            )
+
+        assert self.device.attributes[DeviceAttributes.cur_quantify] == 0
+
+    def test_set_attribute_cur_quantify_validates_values(self) -> None:
+        """Reject wrong-typed faucet gear values before sending."""
+        with pytest.raises(ValueWrongType):
+            self.device.set_attribute(DeviceAttributes.cur_quantify, True)
+        with pytest.raises(ValueWrongType):
+            self.device.set_attribute(DeviceAttributes.cur_quantify, "0.5")
+        with pytest.raises(ValueError, match="whole number"):
+            self.device.set_attribute(DeviceAttributes.cur_quantify, 22.5)
+        with pytest.raises(ValueError, match="preset slot"):
+            self.device.set_attribute(DeviceAttributes.cur_quantify, 5)
+        with patch.object(self.device, "build_send") as mock_build_send:
+            self.device.set_attribute(DeviceAttributes.cur_quantify, 21)
+            self.device.set_attribute(DeviceAttributes.cur_quantify, 21.0)
+            self.device.set_attribute(DeviceAttributes.cur_quantify, 0)
+            assert mock_build_send.call_count == 3
+
     def test_set_attribute_water_purifier_group_data_is_read_only(self) -> None:
         """Test read-only purifier group data never emits a set command."""
         with patch.object(self.device, "build_send") as mock_build_send:
@@ -240,7 +273,6 @@ class TestMideaEDDevice:
                 DeviceAttributes.smart_no_obsolete_water,
                 DeviceAttributes.v_version,
                 DeviceAttributes.quantify_1,
-                DeviceAttributes.cur_quantify,
                 DeviceAttributes.quantify_21,
                 DeviceAttributes.input_temperature_sensing,
             ):
