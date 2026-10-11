@@ -23,6 +23,30 @@ from midealan.message import ListTypes
 
 TEST_AUTH_VALUE = "AA"
 
+CAPTURED_CUR_QUANTIFY_21_FRAME = bytes.fromhex(
+    "aa69ed00000000000004ff01030040088201030110000240010000001050563b00000011"
+    "5000c31e00001340730005002030000200236000000000001538a02c01f401e803000000"
+    "003a40000000003b105252100316503c180000003c5041400000000712230f120014",
+)
+
+CAPTURED_CUR_QUANTIFY_22_FRAME = bytes.fromhex(
+    "aa69ed00000000000004ff01030040088243010110000240010000001050563b00000011"
+    "5000c31e00001340740004002030000200236000000000001638a02c01f401e803000000"
+    "003a40000000003b105852100316503c180000003c5041400000000712220f1200ce",
+)
+
+CAPTURED_CUR_QUANTIFY_0_FRAME = bytes.fromhex(
+    "aa69ed00000000000003ff01030040088201030110000240030000001050543800000011"
+    "50a8840f00001340770004002030000200236000000000000038a02c01f401e803000000"
+    "003a40000000003b105652100316503c180000003c50414000000007122c0f1200c3",
+)
+
+CAPTURED_CUR_QUANTIFY_CASES = (
+    (CAPTURED_CUR_QUANTIFY_21_FRAME, 21),
+    (CAPTURED_CUR_QUANTIFY_22_FRAME, 22),
+    (CAPTURED_CUR_QUANTIFY_0_FRAME, 0),
+)
+
 
 class TestMideaEDDevice:
     """Test Midea ED Device."""
@@ -138,11 +162,7 @@ class TestMideaEDDevice:
 
     def test_process_message_water_purifier_frame(self) -> None:
         """Test a captured water purifier frame updates its attributes."""
-        raw = bytes.fromhex(
-            "aa69ed00000000000004ff01030040088201030110000240010000001050563b0000001150"
-            "00c31e00001340730005002030000200236000000000001538a02c01f401e803000000003a"
-            "40000000003b105252100316503c180000003c5041400000000712230f120014",
-        )
+        raw = CAPTURED_CUR_QUANTIFY_21_FRAME
         new_status = self.device.process_message(raw)
         assert new_status[DeviceAttributes.water_kind.value] == 0
         assert new_status[DeviceAttributes.heat_start.value] == 2
@@ -240,7 +260,7 @@ class TestMideaEDDevice:
 
     def test_set_attribute_cur_quantify_uses_official_lua_command(self) -> None:
         """Test the faucet gear write uses the official Lua encoding."""
-        self.test_process_message_water_purifier_frame()
+        self.device.process_message(CAPTURED_CUR_QUANTIFY_21_FRAME)
         with patch.object(self.device, "build_send") as mock_build_send:
             self.device.set_attribute(DeviceAttributes.cur_quantify, 22)
             message = mock_build_send.call_args.args[0]
@@ -306,36 +326,11 @@ class TestMideaEDDevice:
 
     @pytest.mark.parametrize(
         ("raw_frame", "reported_value"),
-        [
-            (
-                (
-                    "aa69ed00000000000004ff01030040088201030110000240010000001050563b0000001150"
-                    "00c31e00001340730005002030000200236000000000001538a02c01f401e803000000003a"
-                    "40000000003b105252100316503c180000003c5041400000000712230f120014"
-                ),
-                21,
-            ),
-            (
-                (
-                    "aa69ed00000000000004ff01030040088243010110000240010000001050563b0000001150"
-                    "00c31e00001340740004002030000200236000000000001638a02c01f401e803000000003a"
-                    "40000000003b105852100316503c180000003c5041400000000712220f1200ce"
-                ),
-                22,
-            ),
-            (
-                (
-                    "aa69ed00000000000003ff0103004008820103011000024003000000105054380000001150"
-                    "a8840f00001340770004002030000200236000000000000038a02c01f401e803000000003a"
-                    "40000000003b105652100316503c180000003c50414000000007122c0f1200c3"
-                ),
-                0,
-            ),
-        ],
+        CAPTURED_CUR_QUANTIFY_CASES,
     )
     def test_cur_quantify_uses_captured_report_after_request(
         self,
-        raw_frame: str,
+        raw_frame: bytes,
         reported_value: int,
     ) -> None:
         """Captured status, not the preceding request, determines the gear."""
@@ -344,7 +339,7 @@ class TestMideaEDDevice:
             self.device.set_attribute(DeviceAttributes.cur_quantify, 24)
         mock_build_send.assert_called_once()
         assert self.device.attributes[DeviceAttributes.cur_quantify] == 21
-        status = self.device.process_message(bytes.fromhex(raw_frame))
+        status = self.device.process_message(raw_frame)
         assert status[DeviceAttributes.cur_quantify] == reported_value
         assert self.device.attributes[DeviceAttributes.cur_quantify] == reported_value
 
@@ -383,7 +378,7 @@ class TestMideaEDDevice:
 
     def test_set_attribute_cur_quantify_validates_values(self) -> None:
         """Reject wrong-typed faucet gear values before sending."""
-        self.test_process_message_water_purifier_frame()
+        self.device.process_message(CAPTURED_CUR_QUANTIFY_21_FRAME)
         with pytest.raises(ValueWrongType):
             self.device.set_attribute(DeviceAttributes.cur_quantify, True)
         with pytest.raises(ValueWrongType):
@@ -400,41 +395,16 @@ class TestMideaEDDevice:
 
     @pytest.mark.parametrize(
         ("raw_frame", "reported_value"),
-        [
-            (
-                (
-                    "aa69ed00000000000004ff01030040088201030110000240010000001050563b0000001150"
-                    "00c31e00001340730005002030000200236000000000001538a02c01f401e803000000003a"
-                    "40000000003b105252100316503c180000003c5041400000000712230f120014"
-                ),
-                21,
-            ),
-            (
-                (
-                    "aa69ed00000000000004ff01030040088243010110000240010000001050563b0000001150"
-                    "00c31e00001340740004002030000200236000000000001638a02c01f401e803000000003a"
-                    "40000000003b105852100316503c180000003c5041400000000712220f1200ce"
-                ),
-                22,
-            ),
-            (
-                (
-                    "aa69ed00000000000003ff0103004008820103011000024003000000105054380000001150"
-                    "a8840f00001340770004002030000200236000000000000038a02c01f401e803000000003a"
-                    "40000000003b105652100316503c180000003c50414000000007122c0f1200c3"
-                ),
-                0,
-            ),
-        ],
+        CAPTURED_CUR_QUANTIFY_CASES,
     )
     def test_cur_quantify_report_enables_writes(
         self,
-        raw_frame: str,
+        raw_frame: bytes,
         reported_value: int,
     ) -> None:
         """A captured gear report enables writes, including a zero report."""
         assert self.device.attributes[DeviceAttributes.cur_quantify] is None
-        status = self.device.process_message(bytes.fromhex(raw_frame))
+        status = self.device.process_message(raw_frame)
         assert status[DeviceAttributes.cur_quantify] == reported_value
         with patch.object(self.device, "build_send") as mock_build_send:
             self.device.set_attribute(DeviceAttributes.cur_quantify, 24)
@@ -487,7 +457,7 @@ class TestMideaEDDevice:
 
     def test_cur_quantify_report_survives_reconnect_reset(self) -> None:
         """Reconnect retains a report in this instance without disk caching."""
-        self.test_process_message_water_purifier_frame()
+        self.device.process_message(CAPTURED_CUR_QUANTIFY_21_FRAME)
         self.device.close_socket()
         with patch.object(self.device, "build_send") as mock_build_send:
             self.device.set_attribute(DeviceAttributes.cur_quantify, 0)
