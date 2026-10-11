@@ -537,7 +537,10 @@ class MideaEDDevice(MideaDevice):
         else:
             message = MessageOldSet(self._message_protocol_version)
         if message is not None:
-            self._attributes[attr] = value
+            # A requested faucet gear is not necessarily accepted by the device.
+            # Keep its last reported value until process_message receives a status.
+            if attr != DeviceAttributes.cur_quantify:
+                self._attributes[attr] = value
             setattr(message, str(attr), value)
             if (
                 attr == DeviceAttributes.wash
