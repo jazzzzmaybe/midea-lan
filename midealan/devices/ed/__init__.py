@@ -520,6 +520,10 @@ class MideaEDDevice(MideaDevice):
             # A non-None value records an observed gear report, including zero.
             # Do not infer capability from the initialized attribute alone.
             if self._attributes.get(DeviceAttributes.cur_quantify) is None:
+                _LOGGER.debug(
+                    "[%s] Ignoring cur_quantify write: no gear report observed",
+                    self.device_id,
+                )
                 return
         message: MessageNewSet | MessageOldSet | None = None
         if self._use_new_set():

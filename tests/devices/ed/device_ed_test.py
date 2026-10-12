@@ -253,9 +253,14 @@ class TestMideaEDDevice:
 
     def test_cur_quantify_without_report_does_not_send(self) -> None:
         """Do not infer faucet gear capability from initialized attributes."""
-        with patch.object(self.device, "build_send") as mock_build_send:
+        with (
+            patch.object(self.device, "build_send") as mock_build_send,
+            patch("midealan.devices.ed._LOGGER") as mock_logger,
+        ):
             self.device.set_attribute(DeviceAttributes.cur_quantify, 22)
         mock_build_send.assert_not_called()
+        # A dropped write before the first report is logged for diagnosability.
+        mock_logger.debug.assert_called_once()
         assert self.device.attributes[DeviceAttributes.cur_quantify] is None
 
     def test_set_attribute_cur_quantify_uses_official_lua_command(self) -> None:
